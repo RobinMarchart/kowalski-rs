@@ -9,7 +9,7 @@ repository = "https://github.com/simonpannek/kowalski-rs"
 [features]
 nlp-model = ["rust-bert"]
 event-calendar = ["ics", "rocket"]
-event-cache = ["parking_lot"]
+event-cache = []
 default = []
 
 [dependencies]
@@ -66,4 +66,4 @@ features = ["with-chrono-0_4", "with-bit-vec-0_6"]
 
 [dependencies.parking_lot]
 version="0.12.1"
-optional=true
+#optional=true

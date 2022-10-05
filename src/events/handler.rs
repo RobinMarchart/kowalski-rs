@@ -10,7 +10,7 @@ use serenity::{
         id::{ChannelId, EmojiId, GuildId, MessageId, RoleId},
         interactions::Interaction,
         user::User,
-    },
+    }, json::Value,
 };
 use tracing::error;
 
@@ -28,6 +28,8 @@ use crate::{
     },
     strings::{ERR_MEMBER_REMOVAL, ERR_REACTION},
 };
+
+use super::unknown::unknown;
 
 pub struct Handler;
 
@@ -134,5 +136,9 @@ impl EventHandler for Handler {
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         interaction_create(&ctx, interaction).await
+    }
+
+    async fn unknown(&self,ctx:Context,name:String,raw:Value){
+        unknown(&ctx, name, raw).await
     }
 }

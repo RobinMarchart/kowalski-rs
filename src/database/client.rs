@@ -103,6 +103,36 @@ impl Database {
                             AND (unicode IS NULL) != (guild_emoji IS NULL))
                     );
 
+                    CREATE TYPE IF NOT EXISTS event_status AS ENUM ('scheduled', 'active', 'completed', 'canceled');
+
+                    CREATE TYPE IF NOT EXISTS event_location AS ENUM ('stage', 'voice', 'external');
+
+                    CREATE TABLE IF NOT EXISTS events (
+                        id              SERIAL PRIMARY KEY,
+                        guild           BIGINT,
+                        event           BIGINT,
+                        name            STRING,
+                        description     STRING,
+                        status          event_status,
+                        location        event_location,
+                        location_name   STRING,
+                        UNIQUE (guild,event),
+                        CONSTRAINT fk_guilds
+                            FOREIGN KEY (guild)
+                            REFERENCES guilds(guild)
+                            ON DELETE CASCADE,
+                    );
+
+                    CREATE TABLE IF NOT EXISTS event_attendees (
+                        event           INTEGER FOREIGN KEY (events) ON DELETE CASCADE,
+                        user            BIGINT,
+                        PRIMARY KEY (event,user),
+                        CONSTRAINT fk_users
+                            FOREIGN KEY (guild, user)
+                            REFERENCES users(guild, \"user\")
+                            ON DELETE CASCADE,
+                    );
+
                     CREATE TABLE IF NOT EXISTS modules (
                         guild           BIGINT PRIMARY KEY,
                         status          BIT(8) NOT NULL,
