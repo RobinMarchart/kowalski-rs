@@ -6,6 +6,9 @@ edition = "2021"
 description = ""
 repository = "https://github.com/simonpannek/kowalski-rs"
 
+[workspace]
+members=["migration"]
+
 [features]
 nlp-model = ["rust-bert"]
 event-calendar = ["ics", "rocket"]

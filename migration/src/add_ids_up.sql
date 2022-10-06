@@ -1,0 +1,204 @@
+ALTER TABLE users ADD COLUMN id BIGSERIAL;
+ALTER TABLE score_reactions DROP CONSTRAINT fk_users;
+ALTER TABLE reminders DROP CONSTRAINT fk_users;
+ALTER TABLE users DROP CONSTRAINT users_pkey;
+ALTER TABLE users ADD PRIMARY KEY(id);
+ALTER TABLE users ADD CONSTRAINT unique_guild_user UNIQUE(guild,"user");
+ALTER TABLE users ALTER COLUMN guild SET NOT NULL;
+ALTER TABLE users ALTER COLUMN "user" SET NOT NULL;
+
+ALTER TABLE channels ADD COLUMN id BIGSERIAL;
+ALTER TABLE messages DROP CONSTRAINT fk_channels;
+ALTER TABLE score_drops DROP CONSTRAINT fk_channels;
+ALTER TABLE reaction_roles DROP CONSTRAINT fk_channels;
+ALTER TABLE reminders DROP CONSTRAINT fk_channels;
+ALTER TABLE channels DROP CONSTRAINT channels_pkey;
+ALTER TABLE channels ADD PRIMARY KEY(id);
+ALTER TABLE channels ADD CONSTRAINT unique_guild_channel UNIQUE(guild,channel);
+ALTER TABLE channels ALTER COLUMN guild SET NOT NULL;
+ALTER TABLE channels ALTER COLUMN channel SET NOT NULL;
+
+ALTER TABLE roles ADD COLUMN id BIGSERIAL;
+ALTER TABLE score_cooldowns DROP CONSTRAINT fk_roles;
+ALTER TABLE score_roles DROP CONSTRAINT fk_roles;
+ALTER TABLE reaction_roles DROP CONSTRAINT fk_roles;
+ALTER TABLE roles DROP CONSTRAINT roles_pkey;
+ALTER TABLE roles ADD PRIMARY KEY(id);
+ALTER TABLE roles ADD CONSTRAINT unique_guild_role UNIQUE(guild,role);
+ALTER TABLE roles ALTER COLUMN guild SET NOT NULL;
+ALTER TABLE roles ALTER COLUMN role SET NOT NULL;
+
+ALTER TABLE reaction_roles DROP CONSTRAINT fk_messages;
+ALTER TABLE reminders DROP CONSTRAINT fk_messages;
+UPDATE messages
+       SET (channel)=
+       (channels.id) FROM channels
+       WHERE channels.channel=channel AND chanels.guild=guild;
+ALTER TABLE messages ADD COLUMN id BIGSERIAL;
+ALTER TABLE messages DROP CONSTRAINT messages_pkey;
+ALTER TABLE messages ADD PRIMARY KEY(id);
+ALTER TABLE messages ADD CONSTRAINT unique_fields UNIQUE(channel, message);
+ALTER TABLE messages ALTER channel SET NOT NULL;
+ALTER TABLE messages ALTER message SET NOT NULL;
+ALTER TABLE messages DROP CONSTRAINT fk_guilds;
+ALTER TABLE messages DROP COLUMN guild;
+ALTER TABLE messages
+            ADD CONSTRAINT fk_channels
+                FOREIGN KEY (channel)
+                REFERENCES channels(id)
+                ON DELETE CASCADE;
+
+ALTER TABLE score_emojis DROP CONSTRAINT fk_emojis;
+ALTER TABLE reaction_roles DROP CONSTRAINT fk_emojis;
+ALTER TABLE emojis ALTER COLUMN id Type BIGSERIAL;
+
+ALTER TABLE publishing ALTER COLUMN guild SET NOT NULL;
+
+UPDATE score_cooldowns
+       SET (role)=
+       (roles.id) FROM roles
+       WHERE roles.role=role AND roles.guild=guild;
+ALTER TABLE score_cooldowns DROP CONSTRAINT score_cooldowns_pkey;
+ALTER TABLE score_cooldowns ADD PRIMARY KEY(role);
+ALTER TABLE score_cooldowns DROP CONSTRAINT fk_guilds
+ALTER TABLE score_cooldowns DROP COLUMN guild;
+ALTER TABLE score_cooldowns
+            ADD CONSTRAINT fk_roles
+                FOREIGN KEY (role)
+                REFERENCES roles(id)
+                ON DELETE CASCADE;
+
+UPDATE score_drops
+       SET (channel)=(channels.id) FROM channels
+       WHERE channels.channel=channel AND chanels.guild=guild;
+ALTER TABLE score_drops DROP CONSTRAINT score_drops_pkey;
+ALTER TABLE score_drops ADD PRIMARY KEY(channel);
+ALTER TABLE score_drops DROP CONSTRAINT fk_guilds
+ALTER TABLE score_drops DROP COLUMN guild;
+ALTER TABLE score_drops
+            ADD CONSTRAINT fk_channels
+                FOREIGN KEY (channel)
+                REFERENCES channels(id)
+                ON DELETE CASCADE;
+
+ALTER TABLE score_emojis ADD COLUMN id BIGSERIAL;
+ALTER TABLE score_reactions DROP CONSTRAINT fk_score_emojis;
+ALTER TABLE score_emojis DROP CONSTRAINT score_emojis_pkey;
+ALTER TABLE score_emojis ALTER COLUMN emoji Type BIGINTEGER;
+ALTER TABLE score_emojis ALTER COLUMN guild SET NOT NULL;
+ALTER TABLE score_emojis ALTER COLUMN emoji SET NOT NULL;
+ALTER TABLE score_emojis ADD PRIMARY KEY(id);
+ALTER TABLE score_emojis
+            ADD CONSTRAINT fk_emojis
+                FOREIGN KEY (emoji)
+                REFERENCES emojis(id)
+                ON DELETE CASCADE;
+ALTER TABLE score_emojis ADD CONSTRAINT unique_guild_emoji UNIQUE(guild,emoji);
+
+
+
+UPDATE score_reactions
+       SET (user_to)=(users.id) FROM users
+       WHERE users.user=user_to AND users.guild=guild;
+ALTER TABLE score_reactions ALTER COLUMN emoji TYPE BIGINTEGER;
+UPDATE score_reactions
+       SET (emoji)=(score_emojis.id) FROM score_emojis
+       WHERE score_emojis.emoji=emoji AND score_emojis.guild=guild;
+ALTER TABLE score_reactions ADD COLUMN id BIGSERIAL;
+ALTER TABLE score_reactions DROP CONSTRAINT score_reactions_pkey;
+ALTER TABLE score_reactions DROP CONSTRAINT fk_guilds;
+ALTER TABLE score_reactions DROP COLUMN guild;
+ALTER TABLE score_reactions ADD PRIMARY KEY(id);
+ALTER TABLE score_reactions ALTER COLUMN user_from SET NOT NULL;
+ALTER TABLE score_reactions ALTER COLUMN user_to SET NOT NULL;
+ALTER TABLE score_reactions ALTER COLUMN message SET NOT NULL;
+ALTER TABLE score_reactions ALTER COLUMN channel SET NOT NULL;
+ALTER TABLE score_reactions ALTER COLUMN emoji SET NOT NULL;
+ALTER TABLE score_reactions ADD CONSTRAINT unique_score_reaction UNIQUE(user_from,message,channel,emoji);
+ALTER TABLE score_reactions
+            ADD CONSTRAINT fk_score_emojis
+                FOREIGN KEY (emoji)
+                REFERENCES score_emojis(id)
+                ON DELETE CASCADE;
+ALTER TABLE score_reactions
+            ADD CONSTRAINT fk_users
+                FOREIGN KEY (user_to)
+                REFERENCES users(id)
+                ON DELETE CASCADE;
+
+UPDATE score_roles
+       SET (role)=(roles.id) FROM roles
+       WHERE roles.role=role AND roles.guild=guild;
+ALTER TABLE score_roles ADD COLUMN id BIGSERIAL;
+ALTER TABLE score_roles DROP CONSTRAINT score_roles_pkey;
+ALTER TABLE score_roles DROP CONSTRAINT fk_guilds;
+ALTER TABLE score_roles DROP COLUMN guild;
+ALTER TABLE score_roles ADD PRIMARY KEY(id);
+ALTER TABLE score_roles ALTER COLUMN role SET NOT NULL;
+ALTER TABLE score_roles ALTER COLUMN score SET NOT NULL;
+ALTER TABLE score_roles ADD CONSTRAINT unique_role_score UNIQUE(role,score);
+ALTER TABLE score_roles
+            ADD CONSTRAINT fk_roles
+                FOREIGN KEY (role)
+                REFERENCES roles(id)
+                ON DELETE CASCADE;
+
+UPDATE reaction_roles
+       SET (message)=(messages.id) FROM messages INNER JOIN channels ON messages.channel=channels.id
+       WHERE messages.message=message AND channels.channel=channel AND channels.guild=guild;
+UPDATE score_roles
+       SET (role)=(roles.id) FROM roles
+       WHERE roles.role=role AND roles.guild=guild;
+ALTER TABLE reaction_roles ADD COLUMN id BIGSERIAL;
+ALTER TABLE reaction_roles DROP CONSTRAINT reaction_roles_pkey;
+ALTER TABLE reaction_roles DROP CONSTRAINT fk_guilds;
+ALTER TABLE reaction_roles DROP COLUMN guild;
+ALTER TABLE reaction_roles DROP COLUMN channel;
+ALTER TABLE reaction_roles ALTER COLUMN emoji Type BIGINTEGER;
+ALTER TABLE reaction_roles ADD PRIMARY KEY(id);
+ALTER TABLE reaction_roles ALTER COLUMN message SET NOT NULL;
+ALTER TABLE reaction_roles ALTER COLUMN emoji SET NOT NULL;
+ALTER TABLE reaction_roles ALTER COLUMN role SET NOT NULL;
+ALTER TABLE reaction_roles ADD CONSTRAINT unique_reaction_role UNIQUE(message,emoji,role);
+ALTER TABLE reaction_roles
+            ADD CONSTRAINT fk_emojis
+                FOREIGN KEY (emoji)
+                REFERENCES emojis(id)
+                ON DELETE CASCADE;
+ALTER TABLE reaction_roles
+            ADD CONSTRAINT fk_roles
+                FOREIGN KEY (role)
+                REFERENCES roles(id)
+                ON DELETE CASCADE;
+ALTER TABLE reaction_roles
+            ADD CONSTRAINT fk_messages
+                FOREIGN KEY (message)
+                REFERENCES messages(id)
+                ON DELETE CASCADE;
+
+UPDATE reminders
+       SET (message)=(messages.id) FROM messages INNER JOIN channels ON messages.channel=channels.id
+       WHERE messages.message=message AND channels.channel=channel AND channels.guild=guild;
+UPDATE reminders
+       SET ("user")=(users.id) FROM users
+       WHERE users."user"="user" AND users.guild=guild;
+ALTER TABLE reminders ADD COLUMN id BIGSERIAL;
+ALTER TABLE reminders DROP CONSTRAINT fk_guilds;
+ALTER TABLE reminders DROP CONSTRAINT reminders_pkey;
+ALTER TABLE reminders DROP COLUMN guild;
+ALTER TABLE reminders DROP COLUMN channel;
+ALTER TABLE reminders ADD PRIMARY KEY(id);
+ALTER TABLE reminders ADD CONSTRAINT unique_reminders UNIQUE(message,"user");
+ALTER TABLE reminders ALTER COLUMN message SET NOT NULL;
+ALTER TABLE reminders ALTER COLUMN "user" SET NOT NULL;
+ALTER TABLE reminders ALTER COLUMN time SET NOT NULL;
+ALTER TABLE reminders
+            ADD CONSTRAINT fk_messages
+                FOREIGN KEY (message)
+                REFERENCES messages(id)
+                ON DELETE CASCADE;
+ALTER TABLE score_reactions
+            ADD CONSTRAINT fk_users
+                FOREIGN KEY (user_to)
+                REFERENCES users(id)
+                ON DELETE CASCADE;
