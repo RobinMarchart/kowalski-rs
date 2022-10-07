@@ -31,9 +31,8 @@ ALTER TABLE roles ALTER COLUMN role SET NOT NULL;
 ALTER TABLE reaction_roles DROP CONSTRAINT fk_messages;
 ALTER TABLE reminders DROP CONSTRAINT fk_messages;
 UPDATE messages
-       SET (channel)=
-       (channels.id) FROM channels
-       WHERE channels.channel=channel AND chanels.guild=guild;
+       SET channel=channels.id FROM channels
+       WHERE channels.channel=messages.channel AND channels.guild=messages.guild;
 ALTER TABLE messages ADD COLUMN id BIGSERIAL;
 ALTER TABLE messages DROP CONSTRAINT messages_pkey;
 ALTER TABLE messages ADD PRIMARY KEY(id);
@@ -50,17 +49,16 @@ ALTER TABLE messages
 
 ALTER TABLE score_emojis DROP CONSTRAINT fk_emojis;
 ALTER TABLE reaction_roles DROP CONSTRAINT fk_emojis;
-ALTER TABLE emojis ALTER COLUMN id Type BIGSERIAL;
+ALTER TABLE emojis ALTER COLUMN id Type BIGINT;
 
 ALTER TABLE publishing ALTER COLUMN guild SET NOT NULL;
 
 UPDATE score_cooldowns
-       SET (role)=
-       (roles.id) FROM roles
-       WHERE roles.role=role AND roles.guild=guild;
+       SET role=roles.id FROM roles
+       WHERE roles.role=score_cooldowns.role AND roles.guild=score_cooldowns.guild;
 ALTER TABLE score_cooldowns DROP CONSTRAINT score_cooldowns_pkey;
 ALTER TABLE score_cooldowns ADD PRIMARY KEY(role);
-ALTER TABLE score_cooldowns DROP CONSTRAINT fk_guilds
+ALTER TABLE score_cooldowns DROP CONSTRAINT fk_guilds;
 ALTER TABLE score_cooldowns DROP COLUMN guild;
 ALTER TABLE score_cooldowns
             ADD CONSTRAINT fk_roles
@@ -69,11 +67,11 @@ ALTER TABLE score_cooldowns
                 ON DELETE CASCADE;
 
 UPDATE score_drops
-       SET (channel)=(channels.id) FROM channels
-       WHERE channels.channel=channel AND chanels.guild=guild;
+       SET channel=channels.id FROM channels
+       WHERE channels.channel=score_drops.channel AND channels.guild=score_drops.guild;
 ALTER TABLE score_drops DROP CONSTRAINT score_drops_pkey;
 ALTER TABLE score_drops ADD PRIMARY KEY(channel);
-ALTER TABLE score_drops DROP CONSTRAINT fk_guilds
+ALTER TABLE score_drops DROP CONSTRAINT fk_guilds;
 ALTER TABLE score_drops DROP COLUMN guild;
 ALTER TABLE score_drops
             ADD CONSTRAINT fk_channels
@@ -84,7 +82,7 @@ ALTER TABLE score_drops
 ALTER TABLE score_emojis ADD COLUMN id BIGSERIAL;
 ALTER TABLE score_reactions DROP CONSTRAINT fk_score_emojis;
 ALTER TABLE score_emojis DROP CONSTRAINT score_emojis_pkey;
-ALTER TABLE score_emojis ALTER COLUMN emoji Type BIGINTEGER;
+ALTER TABLE score_emojis ALTER COLUMN emoji Type BIGINT;
 ALTER TABLE score_emojis ALTER COLUMN guild SET NOT NULL;
 ALTER TABLE score_emojis ALTER COLUMN emoji SET NOT NULL;
 ALTER TABLE score_emojis ADD PRIMARY KEY(id);
@@ -98,12 +96,12 @@ ALTER TABLE score_emojis ADD CONSTRAINT unique_guild_emoji UNIQUE(guild,emoji);
 
 
 UPDATE score_reactions
-       SET (user_to)=(users.id) FROM users
-       WHERE users.user=user_to AND users.guild=guild;
-ALTER TABLE score_reactions ALTER COLUMN emoji TYPE BIGINTEGER;
+       SET user_to=users.id FROM users
+       WHERE users.user=score_reactions.user_to AND users.guild=score_reactions.guild;
+ALTER TABLE score_reactions ALTER COLUMN emoji TYPE BIGINT;
 UPDATE score_reactions
-       SET (emoji)=(score_emojis.id) FROM score_emojis
-       WHERE score_emojis.emoji=emoji AND score_emojis.guild=guild;
+       SET emoji=score_emojis.id FROM score_emojis
+       WHERE score_emojis.emoji=score_reactions.emoji AND score_emojis.guild=score_reactions.guild;
 ALTER TABLE score_reactions ADD COLUMN id BIGSERIAL;
 ALTER TABLE score_reactions DROP CONSTRAINT score_reactions_pkey;
 ALTER TABLE score_reactions DROP CONSTRAINT fk_guilds;
@@ -127,8 +125,8 @@ ALTER TABLE score_reactions
                 ON DELETE CASCADE;
 
 UPDATE score_roles
-       SET (role)=(roles.id) FROM roles
-       WHERE roles.role=role AND roles.guild=guild;
+       SET role=roles.id FROM roles
+       WHERE roles.role=score_roles.role AND roles.guild=score_roles.guild;
 ALTER TABLE score_roles ADD COLUMN id BIGSERIAL;
 ALTER TABLE score_roles DROP CONSTRAINT score_roles_pkey;
 ALTER TABLE score_roles DROP CONSTRAINT fk_guilds;
@@ -144,17 +142,17 @@ ALTER TABLE score_roles
                 ON DELETE CASCADE;
 
 UPDATE reaction_roles
-       SET (message)=(messages.id) FROM messages INNER JOIN channels ON messages.channel=channels.id
-       WHERE messages.message=message AND channels.channel=channel AND channels.guild=guild;
-UPDATE score_roles
-       SET (role)=(roles.id) FROM roles
-       WHERE roles.role=role AND roles.guild=guild;
+       SET message=messages.id FROM messages INNER JOIN channels ON messages.channel=channels.id
+       WHERE messages.message=reaction_roles.message AND channels.channel=reaction_roles.channel AND channels.guild=reaction_roles.guild;
+UPDATE reaction_roles
+       SET role=roles.id FROM roles
+       WHERE roles.role=reaction_roles.role AND roles.guild=reaction_roles.guild;
 ALTER TABLE reaction_roles ADD COLUMN id BIGSERIAL;
 ALTER TABLE reaction_roles DROP CONSTRAINT reaction_roles_pkey;
 ALTER TABLE reaction_roles DROP CONSTRAINT fk_guilds;
 ALTER TABLE reaction_roles DROP COLUMN guild;
 ALTER TABLE reaction_roles DROP COLUMN channel;
-ALTER TABLE reaction_roles ALTER COLUMN emoji Type BIGINTEGER;
+ALTER TABLE reaction_roles ALTER COLUMN emoji Type BIGINT;
 ALTER TABLE reaction_roles ADD PRIMARY KEY(id);
 ALTER TABLE reaction_roles ALTER COLUMN message SET NOT NULL;
 ALTER TABLE reaction_roles ALTER COLUMN emoji SET NOT NULL;
@@ -177,11 +175,11 @@ ALTER TABLE reaction_roles
                 ON DELETE CASCADE;
 
 UPDATE reminders
-       SET (message)=(messages.id) FROM messages INNER JOIN channels ON messages.channel=channels.id
-       WHERE messages.message=message AND channels.channel=channel AND channels.guild=guild;
+       SET message=messages.id FROM messages INNER JOIN channels ON messages.channel=channels.id
+       WHERE messages.message=reminders.message AND channels.channel=reminders.channel AND channels.guild=reminders.guild;
 UPDATE reminders
-       SET ("user")=(users.id) FROM users
-       WHERE users."user"="user" AND users.guild=guild;
+       SET "user"=users.id FROM users
+       WHERE users."user"=reminders."user" AND users.guild=reminders.guild;
 ALTER TABLE reminders ADD COLUMN id BIGSERIAL;
 ALTER TABLE reminders DROP CONSTRAINT fk_guilds;
 ALTER TABLE reminders DROP CONSTRAINT reminders_pkey;
@@ -197,8 +195,8 @@ ALTER TABLE reminders
                 FOREIGN KEY (message)
                 REFERENCES messages(id)
                 ON DELETE CASCADE;
-ALTER TABLE score_reactions
+ALTER TABLE reminders
             ADD CONSTRAINT fk_users
-                FOREIGN KEY (user_to)
+                FOREIGN KEY ("user")
                 REFERENCES users(id)
                 ON DELETE CASCADE;
