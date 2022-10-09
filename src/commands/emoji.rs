@@ -11,6 +11,7 @@ use serenity::{
     },
     utils::parse_emoji,
 };
+use sqlx::query;
 use unic_emoji_char::is_emoji;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -116,18 +117,19 @@ pub async fn execute(
                     let upvote = matches!(action, Action::AddUpvote);
 
                     // Insert entry
-                    database
-                        .client
-                        .execute(
-                            "
-                    INSERT INTO score_emojis
-                    VALUES ($1::BIGINT, $2::INT, $3::BOOLEAN)
+                    query!(
+                        "
+                    INSERT INTO score_emojis(guild,emoji,upvote)
+                    VALUES ($1, $2, $3)
                     ON CONFLICT (guild, emoji)
-                    DO UPDATE SET upvote = $3::BOOL
+                    DO UPDATE SET upvote = $3
                     ",
-                            &[&guild_db_id, &emoji_id, &upvote],
-                        )
-                        .await?;
+                        guild_db_id,
+                        emoji_id,
+                        upvote,
+                    )
+                    .execute(database.db())
+                    .await?;
 
                     send_response(
                         &ctx,
@@ -156,15 +158,15 @@ pub async fn execute(
                     match response {
                         Some(InteractionResponse::Continue) => {
                             // Delete entries
-                            database
-                                .client
-                                .execute(
-                                    "
+                            query!(
+                                "
                                     DELETE FROM score_emojis
-                                    WHERE emoji = $1::INT",
-                                    &[&emoji_id],
-                                )
-                                .await?;
+                                    WHERE emoji = $1 AND guild=$2",
+                                emoji_id,
+                                guild_db_id,
+                            )
+                            .execute(database.db())
+                            .await?;
 
                             send_response(
                                 &ctx,

@@ -1,3 +1,5 @@
+-- Add migration script here
+
 ALTER TABLE users ADD COLUMN id BIGSERIAL;
 ALTER TABLE score_reactions DROP CONSTRAINT fk_users;
 ALTER TABLE reminders DROP CONSTRAINT fk_users;
@@ -50,6 +52,21 @@ ALTER TABLE messages
 ALTER TABLE score_emojis DROP CONSTRAINT fk_emojis;
 ALTER TABLE reaction_roles DROP CONSTRAINT fk_emojis;
 ALTER TABLE emojis ALTER COLUMN id Type BIGINT;
+
+ALTER TABLE modules ADD COLUMN owner BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE modules ADD COLUMN utility BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE modules ADD COLUMN score BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE modules ADD COLUMN reaction_roles BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE modules ADD COLUMN "analyze" BOOLEAN NOT NULL DEFAULT false;
+UPDATE modules
+       SET (owner,utility,score,reaction_roles,"analyze")=(
+            status&B'00000001'=B'00000001',
+            status&B'00000010'=B'00000010',
+            status&B'00000100'=B'00000100',
+            status&B'00001000'=B'00001000',
+            status&B'00010000'=B'00010000'
+);
+ALTER TABLE modules DROP COLUMN status;
 
 ALTER TABLE publishing ALTER COLUMN guild SET NOT NULL;
 
@@ -104,8 +121,6 @@ UPDATE score_reactions
        WHERE score_emojis.emoji=score_reactions.emoji AND score_emojis.guild=score_reactions.guild;
 ALTER TABLE score_reactions ADD COLUMN id BIGSERIAL;
 ALTER TABLE score_reactions DROP CONSTRAINT score_reactions_pkey;
-ALTER TABLE score_reactions DROP CONSTRAINT fk_guilds;
-ALTER TABLE score_reactions DROP COLUMN guild;
 ALTER TABLE score_reactions ADD PRIMARY KEY(id);
 ALTER TABLE score_reactions ALTER COLUMN user_from SET NOT NULL;
 ALTER TABLE score_reactions ALTER COLUMN user_to SET NOT NULL;
@@ -113,6 +128,8 @@ ALTER TABLE score_reactions ALTER COLUMN message SET NOT NULL;
 ALTER TABLE score_reactions ALTER COLUMN channel SET NOT NULL;
 ALTER TABLE score_reactions ALTER COLUMN emoji SET NOT NULL;
 ALTER TABLE score_reactions ADD CONSTRAINT unique_score_reaction UNIQUE(user_from,message,channel,emoji);
+ALTER TABLE score_reactions DROP CONSTRAINT fk_guilds;
+ALTER TABLE score_reactions DROP COLUMN guild;
 ALTER TABLE score_reactions
             ADD CONSTRAINT fk_score_emojis
                 FOREIGN KEY (emoji)

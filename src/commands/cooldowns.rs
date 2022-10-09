@@ -4,6 +4,7 @@ use serenity::{
     model::{id::RoleId, interactions::application_command::ApplicationCommandInteraction},
     prelude::Mentionable,
 };
+use sqlx::query;
 
 use crate::{
     config::Command, config::Config, data, database::client::Database, error::KowalskiError,
@@ -25,20 +26,19 @@ pub async fn execute(
 
     // Get roles and their respective cooldowns
     let role_cooldowns: Vec<_> = {
-        let rows = database
-            .client
-            .query(
+        let rows =
+            query!(
                 "
-                SELECT role, cooldown FROM score_cooldowns
-                WHERE guild = $1::BIGINT
+                SELECT roles.role, score_cooldowns.cooldown FROM score_cooldowns INNER JOIN roles ON score_cooldowns.role=roles.id
+                WHERE roles.guild = $1
                 ORDER BY cooldown
                 ",
-                &[&guild_db_id],
-            )
+                guild_db_id,
+            ).fetch_all(database.db())
             .await?;
 
         rows.iter()
-            .map(|row| (RoleId(row.get::<_, i64>(0) as u64), row.get::<_, i64>(1)))
+            .map(|row| (RoleId(row.role as u64), row.cooldown))
             .collect()
     };
 

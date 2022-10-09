@@ -3,9 +3,10 @@ use serenity::{
     client::Context,
     model::{
         channel::ReactionType, id::EmojiId,
-        interactions::application_command::ApplicationCommandInteraction,
+        interactions::application_command::ApplicationCommandInteraction, prelude::GuildId,
     },
 };
+use sqlx::query;
 
 use crate::{
     config::Command, data, database::client::Database, error::KowalskiError, utils::send_response,
@@ -26,41 +27,30 @@ pub async fn execute(
 
     // Get up- and downvote emojis
     let (upvotes, downvotes) = {
-        let rows = database
-            .client
-            .query(
+        let rows = query!(
                 "
-                SELECT unicode, guild_emoji, upvote FROM score_emojis se
-                INNER JOIN emojis e ON se.emoji = e.id
-                WHERE se.guild = $1::BIGINT
+                SELECT emojis.unicode, emojis.guild_emoji, emojis.guild, score_emojis.upvote FROM score_emojis
+                INNER JOIN emojis  ON score_emojis.emoji = emojis.id
+                WHERE score_emojis.guild = $1
                 ",
-                &[&guild_db_id],
-            )
+                guild_db_id,
+            ).fetch_all(database.db())
             .await?;
 
         let mut upvotes = Vec::new();
         let mut downvotes = Vec::new();
 
         for row in rows {
-            let unicode: Option<String> = row.get(0);
-            let guild_emoji: Option<i64> = row.get(1);
-            let upvote: bool = row.get(2);
-
-            let emoji = match (unicode, guild_emoji) {
-                (Some(string), _) => ReactionType::Unicode(string),
-                (_, Some(id)) => {
-                    let emoji = guild_id.emoji(&ctx.http, EmojiId(id as u64)).await?;
-
-                    ReactionType::Custom {
-                        animated: emoji.animated,
-                        id: emoji.id,
-                        name: Some(emoji.name),
-                    }
-                }
+            let emoji = match (row.unicode, row.guild_emoji, row.guild) {
+                (Some(string), _, _) => ReactionType::Unicode(string),
+                (_, Some(id), Some(guild)) => GuildId::from(guild as u64)
+                    .emoji(&ctx.http, EmojiId(id as u64))
+                    .await?
+                    .into(),
                 _ => unreachable!(),
             };
 
-            if upvote {
+            if row.upvote {
                 upvotes.push(emoji);
             } else {
                 downvotes.push(emoji);

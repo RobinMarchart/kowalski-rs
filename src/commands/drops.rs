@@ -4,6 +4,7 @@ use serenity::{
     model::{id::ChannelId, interactions::application_command::ApplicationCommandInteraction},
     prelude::Mentionable,
 };
+use sqlx::{query, query_scalar};
 
 use crate::{
     config::Command, data, database::client::Database, error::KowalskiError, utils::send_response,
@@ -24,16 +25,13 @@ pub async fn execute(
 
     // Get all channels where the channel is activated
     let channels: Vec<_> = {
-        let rows = database
-            .client
-            .query(
-                "SELECT channel FROM score_drops WHERE guild = $1",
-                &[&guild_db_id],
-            )
-            .await?;
+        let rows = query_scalar!(
+                "SELECT channels.channel FROM score_drops INNER JOIN channels ON score_drops.channel=channels.id WHERE channels.guild = $1",
+                guild_db_id,
+            ).fetch_all(database.db()).await?;
 
-        rows.iter()
-            .map(|row| ChannelId(row.get::<_, i64>(0) as u64))
+        rows.into_iter()
+            .map(|row| ChannelId(row as u64))
             .collect()
     };
 

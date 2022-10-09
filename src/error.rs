@@ -10,7 +10,7 @@ pub enum KowalskiError {
     #[error("Failed to execute the database query: {source:?}")]
     DatabaseError {
         #[from]
-        source: tokio_postgres::Error,
+        source: sqlx::Error,
     },
     #[cfg(feature = "nlp-model")]
     #[error("Something went wrong handling the language model: {source:?}")]
@@ -31,3 +31,4 @@ impl From<serde_json::Error> for KowalskiError {
         KowalskiError::DiscordApiError(format!("{}", why))
     }
 }
+

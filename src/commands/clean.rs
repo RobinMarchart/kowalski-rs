@@ -1,12 +1,13 @@
 use std::time::Duration;
 
-use serenity::{
-    client::Context,
-    model::{
-        id::{ChannelId, GuildId, MessageId, RoleId, UserId},
+use itertools::Itertools;
+use log::error;
+use serenity::{futures::{StreamExt, stream, TryStreamExt}, client::Context, model::{
         interactions::application_command::ApplicationCommandInteraction,
-    },
-};
+        prelude::{ChannelId, EmojiId, GuildId, MessageId, ReactionType},
+    }};
+use sqlx::{query, query_scalar};
+use tracing::info;
 
 use crate::{
     config::{Command, Config},
@@ -22,7 +23,7 @@ pub async fn execute(
     command_config: &Command,
 ) -> Result<(), KowalskiError> {
     // Get config and database
-    let (config, _database) = data!(ctx, (Config, Database));
+    let (config, database) = data!(ctx, (Config, Database));
 
     let title = "Clean database tables";
 
@@ -40,17 +41,31 @@ pub async fn execute(
     match response {
         Some(InteractionResponse::Continue) => {
             // Clean all the database tables
-            clean_database(ctx).await;
-
-            send_response(
-                &ctx,
-                &command,
-                command_config,
-                &title,
-                "I successfully cleaned all tables.
+            match clean_database(ctx, &database).await {
+                Ok(_) => {
+                    send_response(
+                        &ctx,
+                        &command,
+                        command_config,
+                        &title,
+                        "I successfully cleaned all tables.
                 Please make sure no data was lost.",
-            )
-            .await
+                    )
+                    .await
+                }
+                Err(e) => {
+                    error!("Error occurred during clean: {}", &e);
+                    send_response(
+                        ctx,
+                        command,
+                        command_config,
+                        title,
+                        "Aborted the action due to an internal error.",
+                    )
+                    .await?;
+                    Err(e)
+                }
+            }
         }
         Some(InteractionResponse::Abort) => {
             send_response(ctx, command, command_config, title, "Aborted the action.").await
@@ -59,158 +74,151 @@ pub async fn execute(
     }
 }
 
-macro_rules! get_guild_ids {
-    ($database:expr, $guild_id:expr, $table_name:expr, $parameter_name:expr, $object:expr) => {{
-        let rows = $database
-            .client
-            .query(
-                &format!(
-                    "SELECT {} FROM {} WHERE guild = $1",
-                    $parameter_name, $table_name
-                ),
-                &[&($guild_id.0 as i64)],
-            )
-            .await
-            .unwrap();
-
-        rows.iter()
-            .map(|row| $object(row.get::<_, i64>(0) as u64))
-            .collect()
-    }};
-}
-
-async fn clean_database(ctx: &Context) {
+async fn clean_database(ctx: &Context, db: &Database) -> Result<(), KowalskiError> {
     // Get database
-    let database = data!(ctx, Database);
+    let ctx = ctx;
+    let transaction = db.begin().await?;
+    let db = db.db();
 
-    // Get all guild ids currently tracked
-    let guild_ids: Vec<_> = {
-        let rows = database
-            .client
-            .query("SELECT guild FROM guilds", &[])
-            .await
-            .unwrap();
+    info!("cleaning database");
 
-        rows.iter()
-            .map(|row| GuildId(row.get::<_, i64>(0) as u64))
-            .collect()
+    let deleted = query!(
+        r#"DELETE FROM guilds WHERE NOT guild=ANY($1)"#,
+        &ctx.cache
+            .guilds()
+            .into_iter()
+            .map(|g| g.0 as i64)
+            .collect_vec()[..]
+    )
+    .execute(db)
+    .await?
+    .rows_affected();
+    info!("{} guild(s) deleted", deleted);
+
+    for guild_id in query_scalar!("SELECT guild FROM guilds;")
+        .fetch_all(db)
+        .await?
+    {
+        let discord_guild_id = GuildId::from(guild_id as u64);
+
+        info!(
+            "cleaning guild {}",
+            discord_guild_id
+                .name(ctx)
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let members: Vec<i64> = discord_guild_id
+            .members_iter(ctx)
+            .map_ok(|member| member.user.id.0 as i64)
+            .try_collect()
+            .await?;
+        let deleted = query!(
+            r#"DELETE FROM users WHERE guild=$1 AND NOT "user"=ANY($2)"#,
+            guild_id,
+            &members[..]
+        )
+        .execute(db)
+        .await?
+        .rows_affected();
+        info!("{} user(s) deleted", deleted);
+        let roles = discord_guild_id
+            .roles(ctx)
+            .await?
+            .into_iter()
+            .map(|r| r.0 .0 as i64)
+            .collect_vec();
+        let deleted = query!(
+            "DELETE FROM roles WHERE guild=$1 AND NOT role=ANY($2)",
+            guild_id,
+            &roles[..]
+        )
+        .execute(db)
+        .await?
+        .rows_affected();
+        info!("{} role(s) deleted", deleted);
+        let emojis = discord_guild_id
+            .emojis(ctx)
+            .await?
+            .into_iter()
+            .map(|emoji| emoji.id.0 as i64)
+            .collect_vec();
+        let deleted = query!(
+            "DELETE FROM emojis WHERE guild=$1 AND NOT guild_emoji=ANY($2)",
+            guild_id,
+            &emojis[..]
+        )
+        .execute(db)
+        .await?
+        .rows_affected();
+        info!("{} emoji(s) deleted", deleted);
+        let channels = discord_guild_id
+            .channels(ctx)
+            .await?
+            .into_iter()
+            .map(|channel| channel.0 .0 as i64)
+            .collect_vec();
+        let deleted = query!(
+            "DELETE FROM channels WHERE guild=$1 AND NOT channel=ANY($2)",
+            guild_id,
+            &channels[..]
+        )
+        .execute(db)
+        .await?
+        .rows_affected();
+        info!("{} channel(s) deleted", deleted);
+        let mut deleted_messages = 0u64;
+        let mut deleted_reactions = 0u64;
+        for message in query!("SELECT messages.id as id,messages.message as message,channels.channel as channel FROM messages INNER JOIN channels ON messages.channel=channels.id WHERE channels.guild=$1",guild_id)
+            .fetch_all(db).await?{
+                let channel_id=ChannelId::from(message.channel as u64);
+                let message_id=MessageId::from(message.message as u64);
+                match channel_id.message(ctx, message_id).await {
+                    Ok(discord_message) => {
+                        for emoji in query!(
+                            "SELECT
+score_emojis.id as id,
+emojis.guild as guild,
+emojis.guild_emoji as guild_emoji,
+emojis.unicode as unicode
+FROM emojis INNER JOIN score_emojis ON score_emojis.emoji=emojis.id
+WHERE $1 IN (SELECT message FROM score_reactions WHERE emoji=score_emojis.id)",message.id)
+.fetch_all(db).await?{
+    let reaction=match &emoji.guild {
+        Some(guild) => GuildId::from(*guild as u64).emoji(ctx, EmojiId::from((emoji.guild_emoji.unwrap()) as u64)).await?.into(),
+        None => ReactionType::Unicode(emoji.unicode.unwrap().clone()),
     };
-
-    for guild_id in guild_ids {
-        match guild_id.to_partial_guild(&ctx.http).await {
-            // Bot is still on the guild
-            Ok(partial_guild) => {
-                // Get channels and roles of the guild
-                let channels = partial_guild.channels(&ctx.http).await.unwrap();
-                let roles = &partial_guild.roles;
-
-                // Get currently tracked user, channel and roles ids of the guild
-                let user_ids: Vec<_> =
-                    get_guild_ids!(database, guild_id, "users", "\"user\"", UserId);
-                let channel_ids: Vec<_> =
-                    get_guild_ids!(database, guild_id, "channels", "channel", ChannelId);
-                let role_ids: Vec<_> = get_guild_ids!(database, guild_id, "roles", "role", RoleId);
-
-                for user_id in user_ids {
-                    let member = partial_guild.member(&ctx, user_id).await;
-
-                    if matches!(member, Err(_)) {
-                        // Delete user from the database
-                        database
-                            .client
-                            .execute(
-                                "DELETE FROM users WHERE guild = $1 AND \"user\" = $2",
-                                &[&(guild_id.0 as i64), &(user_id.0 as i64)],
-                            )
-                            .await
-                            .unwrap();
-                    }
-                }
-
-                for channel_id in channel_ids {
-                    if !channels.contains_key(&channel_id) {
-                        // Delete channel from the database
-                        database
-                            .client
-                            .execute(
-                                "DELETE FROM channels WHERE guild = $1 AND channel = $2",
-                                &[&(guild_id.0 as i64), &(channel_id.0 as i64)],
-                            )
-                            .await
-                            .unwrap();
-                    }
-                }
-
-                for role_id in role_ids {
-                    if !roles.contains_key(&role_id) {
-                        // Delete channel from the database
-                        database
-                            .client
-                            .execute(
-                                "DELETE FROM roles WHERE guild = $1 AND role = $2",
-                                &[&(guild_id.0 as i64), &(role_id.0 as i64)],
-                            )
-                            .await
-                            .unwrap();
-                    }
-                }
-
-                // Get tracked message ids of the guild
-                let message_ids: Vec<_> = {
-                    let rows = database
-                        .client
-                        .query(
-                            "SELECT channel, message FROM messages WHERE guild = $1",
-                            &[&(guild_id.0 as i64)],
-                        )
-                        .await
-                        .unwrap();
-
-                    rows.iter()
-                        .map(|row| {
-                            (
-                                ChannelId(row.get::<_, i64>(0) as u64),
-                                MessageId(row.get::<_, i64>(1) as u64),
-                            )
-                        })
-                        .collect()
-                };
-
-                for (channel_id, message_id) in message_ids {
-                    let message = channel_id.message(&ctx.http, message_id).await;
-
-                    if matches!(message, Err(_)) {
-                        // Delete message from the database
-                        database
-                            .client
-                            .execute(
-                                "
-                                DELETE FROM messages
-                                WHERE guild = $1 AND channel = $2 AND message = $3
-                                ",
-                                &[
-                                    &(guild_id.0 as i64),
-                                    &(channel_id.0 as i64),
-                                    &(message_id.0 as i64),
-                                ],
-                            )
-                            .await
-                            .unwrap();
-                    }
-                }
-            }
-            // Bot is not on the guild anymore
-            _ => {
-                // Delete guild from the database
-                database
-                    .client
-                    .execute(
-                        "DELETE FROM guilds WHERE guild = $1",
-                        &[&(guild_id.0 as i64)],
-                    )
-                    .await
-                    .unwrap();
-            }
-        }
+    let discord_message=&discord_message;
+    let reaction=&reaction;
+    let users_from:Vec<i64>=stream::unfold(Some(None), |after|
+                   {
+                       async move{
+        if let Some(after)=after{
+    match discord_message.reaction_users(ctx, reaction.to_owned(), Some(100), after).await{
+        Ok(users) => {
+            let after=if users.len()<100{Some(Some(users[99].id.clone()))}else{None};
+            Some((Ok(users),after))
+        },
+        Err(e) => Some((Err(e),None)),
     }
+        }else{None}
+    }})
+        .map_ok(|users|stream::iter(users.into_iter().map(|user| -> Result<i64, serenity::Error> {Ok(user.id.0 as i64)})))
+       .try_flatten().try_collect().await?;
+    deleted_reactions+= query!("DELETE FROM score_reactions WHERE message=$1 AND channel=$2 AND emoji=$3 AND NOT user_from=ANY($4);",
+           message.message,message.channel,emoji.id,&users_from[..]
+).execute(db).await?.rows_affected();
+}
+                    }
+                    Err(serenity::Error::Http(_)) => {
+                        query!("DELETE FROM messages WHERE id=$1",message.id).execute(db).await?;
+                        deleted_messages+=1;
+                    }
+                    Err(e)=>return Err(e.into())
+                }
+            }
+        info!("{} messages(s) deleted", deleted_messages);
+        info!("{} reactions(s) deleted", deleted_reactions);
+    }
+    transaction.commit().await?;
+    Ok(())
 }

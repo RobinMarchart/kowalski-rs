@@ -3,6 +3,7 @@ use serenity::{
     model::interactions::application_command::ApplicationCommandInteractionDataOptionValue::Role,
     prelude::Mentionable,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -29,7 +30,6 @@ pub async fn execute(
     };
 
     // Get guild and role ids
-    let guild_db_id = database.get_guild(role.guild_id).await?;
     let role_db_id = database.get_role(role.guild_id, role.id).await?;
 
     let title = format!("Set cooldown for {}", role.name);
@@ -39,17 +39,15 @@ pub async fn execute(
         let cooldown: i64 = parse_arg(options, 1)?;
 
         // Insert or update entry
-        database
-            .client
-            .execute(
+        query!(
                 "
-        INSERT INTO score_cooldowns
-        VALUES ($1::BIGINT, $2::BIGINT, $3::BIGINT)
-        ON CONFLICT (guild, role)
-        DO UPDATE SET cooldown = $3::BIGINT
+        INSERT INTO score_cooldowns(role,cooldown)
+        VALUES ($1, $2)
+        ON CONFLICT (role)
+        DO UPDATE SET cooldown = $2
         ",
-                &[&guild_db_id, &role_db_id, &cooldown],
-            )
+                role_db_id, cooldown,
+            ).execute(database.db())
             .await?;
 
         send_response(
@@ -66,15 +64,13 @@ pub async fn execute(
         .await
     } else {
         // Delete cooldown
-        database
-            .client
-            .execute(
+        query!(
                 "
         DELETE FROM score_cooldowns
-        WHERE guild = $1::BIGINT AND role = $2::BIGINT
+        WHERE role = $1
         ",
-                &[&guild_db_id, &role_db_id],
-            )
+                &role_db_id,
+            ).execute(database.db())
             .await?;
 
         send_response(

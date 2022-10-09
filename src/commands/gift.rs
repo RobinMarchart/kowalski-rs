@@ -7,6 +7,7 @@ use serenity::{
     },
     prelude::Mentionable,
 };
+use sqlx::{query_scalar, query};
 
 use crate::{
     config::{Command, Config},
@@ -44,21 +45,18 @@ pub async fn execute(
     // Calculate amount to gift
     let amount = {
         // Select all upvotes the user has received
-        let row = database
-            .client
-            .query_one(
+        let upvotes = query_scalar!(
                 "
         SELECT COUNT(*) FROM score_reactions r
-        INNER JOIN score_emojis se ON r.guild = se.guild AND r.emoji = se.emoji
-        WHERE r.guild = $1::BIGINT AND user_to = $2::BIGINT AND upvote
+        INNER JOIN score_emojis se ON r.emoji = se.id
+        WHERE user_to = $1::BIGINT AND upvote
         ",
-                &[&guild_db_id, &user_from_db_id],
-            )
-            .await?;
+                user_from_db_id,
+            ).fetch_one(database.db())
+            .await?.unwrap_or_default();
 
-        let upvotes: Option<i64> = row.get(0);
 
-        min(score, upvotes.unwrap_or_default())
+        min(score, upvotes)
     };
 
     let title = format!(
@@ -97,27 +95,21 @@ pub async fn execute(
     match response {
         Some(InteractionResponse::Continue) => {
             // Move reactions to the new user
-            let altered_rows = database
-                .client
-                .execute(
+            let altered_rows = query!(
                     "
-                WITH to_update AS (
-                    SELECT r.guild, user_from, user_to, channel, message, r.emoji
-                    FROM score_reactions r
-                    INNER JOIN score_emojis se ON r.guild = se.guild AND r.emoji = se.emoji
-                    WHERE r.guild = $1::BIGINT AND user_to = $2::BIGINT AND upvote
-                    ORDER BY native
-                    LIMIT $4::BIGINT
-                )
-
                 UPDATE score_reactions
-                SET user_to = $3::BIGINT, native = false
-                WHERE (guild, user_from, user_to, channel, message, emoji)
-                    IN (SELECT * FROM to_update)
+                SET user_to = $2::BIGINT, native = false
+                WHERE id IN (
+                        SELECT r.id
+                        FROM score_reactions r INNER JOIN score_emojis se ON r.emoji=se.id
+                        WHERE r.user_to=$1 AND upvote
+                        ORDER BY native
+                        LIMIT $3
+                );
                 ",
-                    &[&guild_db_id, &user_from_db_id, &user_to_db_id, &amount],
-                )
-                .await?;
+                 user_from_db_id, user_to_db_id, amount,
+                ).execute(database.db())
+                .await?.rows_affected();
 
             send_response(
                 ctx,

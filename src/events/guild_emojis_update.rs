@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use sea_orm::{EntityTrait, QueryFilter};
 use serenity::{
     client::Context,
     model::{
@@ -8,7 +9,7 @@ use serenity::{
     },
 };
 
-use crate::{data, database::client::Database, error::KowalskiError};
+use crate::{data, database::{client::Database, entity::emojis}, error::KowalskiError};
 
 pub async fn guild_emojis_update(
     ctx: &Context,
@@ -22,36 +23,16 @@ pub async fn guild_emojis_update(
     let guild_db_id = guild_id.0 as i64;
 
     // Get all emojis tracked by the database for this guild
-    let emoji_ids: Vec<_> = {
-        let rows = database
-            .client
-            .query(
-                "SELECT guild_emoji FROM emojis WHERE guild = $1::BIGINT",
-                &[&guild_db_id],
-            )
-            .await?;
+    let emoji_list=emojis::Entity::find().filter(emojis::Column::Guild.eq(guild_db_id)).all(&database).await?;
 
-        rows.iter()
-            .map(|row| EmojiId(row.get::<_, i64>(0) as u64))
-            .collect()
-    };
-
-    for emoji_id in emoji_ids {
+    for emoji in emoji_list {
         // Check whether emoji still exists
-        if !current_state.contains_key(&emoji_id) {
-            let emoji_db_id = emoji_id.0 as i64;
+        if !current_state.contains_key(&emoji.guild_emoji.unwrap()) {
 
             // Delete the emoji
-            database
-                .client
-                .execute(
-                    "
-            DELETE FROM emojis
-            WHERE guild = $1::BIGINT AND guild_emoji = $2::BIGINT
-            ",
-                    &[&guild_db_id, &emoji_db_id],
-                )
-                .await?;
+            emojis::Entity::delete_by_id(emoji.id).exec(&database).await?;
+
+
         }
     }
 

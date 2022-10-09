@@ -1,3 +1,5 @@
+-- Add migration script here
+
 CREATE TABLE IF NOT EXISTS guilds (
     guild           BIGINT PRIMARY KEY
 );
