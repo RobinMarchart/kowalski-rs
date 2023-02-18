@@ -12,7 +12,7 @@ use serenity::{
 use strum_macros::{EnumIter, EnumString};
 use tokio::{fs::File, io::AsyncReadExt};
 
-use crate::strings::{ERR_CONFIG_PARSE, ERR_CONFIG_READ};
+use crate::{strings::{ERR_CONFIG_PARSE, ERR_CONFIG_READ}, error::KowalskiError};
 
 #[derive(Deserialize)]
 pub struct Config {
@@ -155,7 +155,7 @@ pub enum Value {
 }
 
 impl Config {
-    pub async fn new() -> Result<Self, Box<dyn Error>> {
+    pub async fn new() -> Result<Self, KowalskiError> {
         let path = "Config.toml";
 
         let mut toml = String::new();

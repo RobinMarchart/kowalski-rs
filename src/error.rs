@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 
+use sqlx::migrate::MigrateError;
 use thiserror::Error;
 
 /// Custom error type of the bot
@@ -11,6 +12,11 @@ pub enum KowalskiError {
     DatabaseError {
         #[from]
         source: sqlx::Error,
+    },
+    #[error("Failed to migrate the database schema: {source:?}")]
+    MigrateError {
+        #[from]
+        source: MigrateError,
     },
     #[cfg(feature = "nlp-model")]
     #[error("Something went wrong handling the language model: {source:?}")]
@@ -31,4 +37,3 @@ impl From<serde_json::Error> for KowalskiError {
         KowalskiError::DiscordApiError(format!("{}", why))
     }
 }
-

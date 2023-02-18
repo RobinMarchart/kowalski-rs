@@ -6,12 +6,13 @@ use serenity::{
         id::{ChannelId, GuildId, MessageId, RoleId, UserId},
     },
 };
+use sqlx::{query, query_as, query_scalar};
 
 use crate::{
     config::Config,
     cooldowns::Cooldowns,
     data,
-    database::{client::Database, types::ModuleStatus},
+    database::{client::Database, types::Modules},
     error::KowalskiError,
 };
 
@@ -20,85 +21,73 @@ pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), K
     let (config, database, cooldowns_lock) = data!(ctx, (Config, Database, Cooldowns));
 
     // Check if the emoji is registered and get its id
-    if let Some(emoji_db_id) = get_emoji_id(&add_reaction.emoji, &database).await? {
+    if let Some(emoji_id) = get_emoji_id(&add_reaction.emoji, &database).await? {
         // Get reaction data
         let (guild_id, user_from_id, user_to_id, channel_id, message_id) =
             get_reaction_data(ctx, &add_reaction).await?;
 
-        // Get guild, channel, user_from, user_to and message ids
-        let guild_db_id = database.get_guild(guild_id).await?;
-        let user_from_db_id = database.get_user(guild_id, user_from_id).await?;
-        let user_to_db_id = database.get_user(guild_id, user_to_id).await?;
-        let channel_db_id = database.get_channel(guild_id, channel_id).await?;
-        let message_db_id = database
-            .get_message(guild_id, channel_id, message_id)
-            .await?;
-
         // Get guild status
-        let status = database
-            .client
-            .query_opt(
-                "
-                SELECT status
-                FROM modules
-                WHERE guild = $1::BIGINT
-                ",
-                &[&guild_db_id],
-            )
-            .await?
-            .map_or(ModuleStatus::default(), |row| row.get(0));
+        let status = query_as!(
+            Modules,
+            r#"
+            SELECT owner, utility, score, reaction_roles, "analyze"
+            FROM modules
+            WHERE guild = $1
+            "#,
+            guild_id,
+        )
+        .fetch_optional(database.db())
+        .await?
+        .unwrap_or_default();
 
         // Get the reaction-roles to assign
         let reaction_roles: Vec<_> = if status.reaction_roles {
-            let rows = database
-                .client
-                .query(
-                    "
-                    SELECT role, slots FROM reaction_roles
-                    WHERE guild = $1::BIGINT AND channel = $2::BIGINT AND message = $3::BIGINT
-                    AND emoji = $4::INT
+            query!(
+                "
+                    SELECT role, slots, _reaction_roles_id FROM reaction_roles_v
+                    WHERE guild = $1 AND channel = $2 AND message = $3
+                    AND _emoji_id = $4
                     ",
-                    &[&guild_db_id, &channel_db_id, &message_db_id, &emoji_db_id],
-                )
-                .await?;
-
-            rows.iter()
-                .map(|row| {
-                    (
-                        RoleId(row.get::<_, i64>(0) as u64),
-                        row.get::<_, Option<i32>>(1),
-                    )
-                })
-                .collect()
+                guild_id,
+                channel_id,
+                message_id,
+                emoji_id
+            )
+            .fetch_all(database.db())
+            .await?
         } else {
             Vec::new()
         };
 
         // Whether the emoji should count as a up-/downvote
-        let levelup = status.score
-            && user_from_id != user_to_id
-            && reaction_roles.is_empty()
-            && database
-                .client
-                .query_opt(
-                    "
-                    SELECT * FROM score_emojis
-                    WHERE guild = $1::BIGINT AND emoji = $2::INT
+        let (levelup, score_emoji_id) =
+            if status.score && user_from_id != user_to_id && reaction_roles.is_empty() {
+                query!(
+                    "SELECT upvote,id FROM score_emojis
+                     WHERE guild = $1 AND emoji = $2
                     ",
-                    &[&guild_db_id, &emoji_db_id],
+                    guild_id,
+                    emoji_id
                 )
+                .fetch_optional(database.db())
                 .await?
-                .is_some();
+                .map(|row| {
+                    if row.upvote {
+                        (1, row.id)
+                    } else {
+                        (-1, row.id)
+                    }
+                })
+                .unwrap_or_default()
+            } else {
+                (0, 0)
+            };
 
         if !reaction_roles.is_empty() {
             // Get guild
-            let guild_id = {
-                let channel = add_reaction.channel_id.to_channel(&ctx.http).await?;
-                channel.guild().map(|channel| channel.guild_id).unwrap()
-            };
-
+            let guild_id = GuildId::from(guild_id as u64);
             // Get the member
-            let mut member = guild_id.member(&ctx, user_from_id.0).await?;
+            let mut member = guild_id.member(&ctx, user_from_id as u64).await?;
 
             // Never give roles to bots
             if member.user.bot {
@@ -108,46 +97,58 @@ pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), K
             // Remove the reaction
             add_reaction.delete(&ctx.http).await?;
 
-            for (role, slots) in reaction_roles {
-                if member.roles.contains(&role) {
-                    // Increment slots
-                    database
-                        .client
-                        .execute(
+            for row in reaction_roles {
+                let (role, slots, id) = (
+                    row.role.unwrap(),
+                    row.slots,
+                    row._reaction_roles_id.unwrap(),
+                );
+                if member
+                    .roles
+                    .contains(&RoleId::from(row.role.unwrap() as u64))
+                {
+                    // Remove role from user
+                    member
+                        .remove_role(&ctx.http, RoleId::from(role as u64))
+                        .await?;
+                    if slots.is_some() {
+                        // Increment slots
+                        query!(
                             "
                         UPDATE reaction_roles
                         SET slots = slots + 1
-                        WHERE guild = $1::BIGINT AND channel = $2::BIGINT AND message = $3::BIGINT
-                        AND emoji = $4::INT AND slots IS NOT NULL
+                        WHERE id = $1 AND slots IS NOT NULL
                         ",
-                            &[&guild_db_id, &channel_db_id, &message_db_id, &emoji_db_id],
+                            id
                         )
+                        .execute(database.db())
                         .await?;
-
-                    // Remove role from user
-                    member.remove_role(&ctx.http, role).await?;
-                } else {
-                    if !matches!(slots, Some(0)) {
-                        // Decrement slots
-                        database
-                            .client
-                            .execute(
-                                "
-                    UPDATE reaction_roles
-                    SET slots = slots - 1
-                    WHERE guild = $1::BIGINT AND channel = $2::BIGINT AND message = $3::BIGINT
-                    AND emoji = $4::INT AND slots IS NOT NULL
-                    ",
-                                &[&guild_db_id, &channel_db_id, &message_db_id, &emoji_db_id],
-                            )
-                            .await?;
-
-                        // Add role to user
-                        member.add_role(&ctx.http, role).await?;
                     }
+                } else if slots.is_none() {
+                    member
+                        .add_role(&ctx.http, RoleId::from(role as u64))
+                        .await?;
+                } else if slots.unwrap() > 0 {
+                    //prevent unsuccessful member add from still increasing the slot count
+                    let mut transaction = database.begin().await?;
+                    query!(
+                        "
+                        UPDATE reaction_roles
+                        SET slots = slots - 1
+                        WHERE id = $1 AND slots IS NOT NULL
+                        ",
+                        id
+                    )
+                    .execute(&mut transaction)
+                    .await?;
+                    // Add role to user
+                    member
+                        .add_role(&ctx.http, RoleId::from(role as u64))
+                        .await?;
+                    transaction.commit().await?;
                 }
             }
-        } else if levelup {
+        } else if levelup != 0 {
             // Check for cooldown
             let cooldown_active = {
                 let mut cooldowns = cooldowns_lock.write().await;
@@ -171,42 +172,32 @@ pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), K
                 // Remove reaction
                 add_reaction.delete(&ctx.http).await?;
             } else {
-                // Insert row
-                database
-                    .client
-                    .execute(
-                        "
-                INSERT INTO score_reactions
-                VALUES($1::BIGINT, $2::BIGINT, $3::BIGINT, $4::BIGINT, $5::BIGINT, $6::INT,
-                $7::BOOLEAN)
-                ON CONFLICT
-                DO NOTHING
-                ",
-                        &[
-                            &guild_db_id,
-                            &user_from_db_id,
-                            &user_to_db_id,
-                            &channel_db_id,
-                            &message_db_id,
-                            &emoji_db_id,
-                            &true,
-                        ],
-                    )
+                let user = database
+                    .get_user(GuildId(guild_id as u64), UserId(user_to_id as u64))
                     .await?;
 
-                // Get guild
-                let guild = {
-                    let channel = add_reaction.channel_id.to_channel(&ctx.http).await?;
-                    channel.guild().map(|channel| channel.guild_id).unwrap()
-                };
+                query!(
+                    "INSERT INTO score_reactions (user_from,user_to,channel,message,emoji)
+                        VALUES ($1, $2, $3, $4, $5 )",
+                    user_from_id,
+                    user,
+                    channel_id,
+                    message_id,
+                    score_emoji_id
+                )
+                .execute(database.db())
+                .await?;
 
+                // Get guild
+                let guild_id = GuildId::from(guild_id as u64);
+                // Get the member
+                let mut member = guild_id.member(&ctx, user_to_id as u64).await?;
                 // Update the roles of the user
-                let mut member = guild.member(&ctx, user_to_id.0).await?;
                 update_roles(&ctx, &database, &mut member).await?;
 
                 // Auto moderate the message if necessary
                 let message = add_reaction.message(&ctx.http).await?;
-                auto_moderate(&ctx, &database, guild, message).await?;
+                auto_moderate(&ctx, &database, guild_id, message).await?;
             }
         }
     }
@@ -220,77 +211,74 @@ pub async fn reaction_remove(
 ) -> Result<(), KowalskiError> {
     // Get database
     let database = data!(ctx, Database);
+    let (guild_id, user_from_id, user_to_id, channel_id, message_id) =
+        get_reaction_data(ctx, &removed_reaction).await?;
 
-    // Check if the emoji is registered
-    if let Some(emoji_db_id) = get_emoji_id(&removed_reaction.emoji, &database).await? {
-        // Get reaction data
-        let (guild_id, user_from_id, _, channel_id, message_id) =
-            get_reaction_data(ctx, &removed_reaction).await?;
+    // Get guild status
+    let status = query_as!(
+        Modules,
+        r#"
+            SELECT owner, utility, score, reaction_roles, "analyze"
+            FROM modules
+            WHERE guild = $1
+            "#,
+        guild_id,
+    )
+    .fetch_optional(database.db())
+    .await?
+    .unwrap_or_default();
 
-        // Get guild, channel, user_from and message ids
-        let guild_db_id = database.get_guild(guild_id).await?;
-        let user_from_db_id = database.get_user(guild_id, user_from_id).await?;
-        let channel_db_id = database.get_channel(guild_id, channel_id).await?;
-        let message_db_id = database
-            .get_message(guild_id, channel_id, message_id)
-            .await?;
-
-        // Get user of which the reaction was removed
-        let user_to_db_id = {
-            let row = database
-                .client
-                .query_opt(
+    //removing score is only necessary if score is actively tracked;
+    if status.score {
+        // Check if the emoji is registered
+        if let Some(emoji_db_id) = match &removed_reaction.emoji {
+            ReactionType::Unicode(string) => {
+                query_scalar!(
                     "
-            SELECT user_to FROM score_reactions
-            WHERE guild = $1::BIGINT AND user_from = $2::BIGINT AND channel = $3::BIGINT
-            AND message = $4::BIGINT AND emoji = $5::INT
-            ",
-                    &[
-                        &guild_db_id,
-                        &user_from_db_id,
-                        &channel_db_id,
-                        &message_db_id,
-                        &emoji_db_id,
-                    ],
+                SELECT _score_emoji_id FROM score_emojis_v
+                WHERE unicode = $1 AND guild = $2
+                ",
+                    string,
+                    guild_id
                 )
-                .await?;
-
-            row.map(|row| row.get::<_, i64>(0))
-        };
-
-        if let Some(user_to_db_id) = user_to_db_id {
-            // Delete possible reaction emoji
-            database
-                .client
-                .execute(
+                .fetch_optional(database.db())
+                .await?
+            }
+            ReactionType::Custom { id: emoji_id, .. } => {
+                query_scalar!(
                     "
-        DELETE FROM score_reactions
-        WHERE guild = $1::BIGINT AND user_from = $2::BIGINT AND channel = $3::BIGINT
-        AND message = $4::BIGINT AND emoji = $5::INT
-        ",
-                    &[
-                        &guild_db_id,
-                        &user_from_db_id,
-                        &channel_db_id,
-                        &message_db_id,
-                        &emoji_db_id,
-                    ],
+                    SELECT _score_emoji_id FROM score_emojis_v
+                    WHERE guild_emoji = $1 AND guild = $2
+                    ",
+                    emoji_id.0 as i64,
+                    guild_id
                 )
-                .await?;
+                .fetch_optional(database.db())
+                .await?
+            }
+            _ => unreachable!(),
+        }
+        .flatten()
+        {
+            // Get reaction data
 
-            // Get guild
-            let guild = {
-                let channel = removed_reaction.channel_id.to_channel(&ctx.http).await?;
-                channel.guild().map(|channel| channel.guild_id).unwrap()
-            };
+            if let Some(user_to_db_id) = query_scalar!(
+                "DELETE FROM score_reactions
+                    USING users AS u
+                    WHERE u.guild=$1 AND u.user=$2 AND user_to=u.id AND user_from=$3 AND channel=$4 AND message=$5 AND emoji=$6
+                    RETURNING u.user",
+            guild_id,user_to_id,user_from_id,channel_id,message_id,emoji_db_id).fetch_optional(database.db()).await?{
+// Get guild
+                let guild_id = GuildId::from(guild_id as u64);
+                // Get the member
+                let mut member = guild_id.member(&ctx, user_to_db_id as u64).await?;
 
             // Update the roles of the user
-            let mut member = guild.member(&ctx, user_to_db_id as u64).await?;
             update_roles(&ctx, &database, &mut member).await?;
 
             // Auto moderate the message if necessary
             let message = removed_reaction.message(&ctx.http).await?;
-            auto_moderate(&ctx, &database, guild, message).await?;
+            auto_moderate(&ctx, &database, guild_id, message).await?;}
         }
     }
 
@@ -305,43 +293,29 @@ pub async fn reaction_remove_all(
     // Get database
     let database = data!(ctx, Database);
 
-    let guild_id = {
+    if let Some(guild_id) = {
         let channel = channel_id.to_channel(&ctx.http).await?;
-        channel.guild().map(|channel| channel.guild_id)
-    };
+        channel.guild().map(|channel| channel.guild_id.0 as i64)
+    } {
+        let message_id = removed_from_message_id.0 as i64;
+        let channel_id = channel_id.0 as i64;
 
-    // Check if there is a guild
-    if let Some(guild_id) = guild_id {
-        // Get guild id
-        let guild_db_id = database.get_guild(guild_id).await?;
-        let channel_db_id = database.get_channel(guild_id, channel_id).await?;
-        let message_db_id = database
-            .get_message(guild_id, channel_id, removed_from_message_id)
-            .await?;
+        let affected_users = query_scalar!(
+            "WITH r AS (DELETE FROM score_reactions
+                USING users AS u
+                WHERE u.guild=$1 and channel=$2 and message=$3 and user_to=u.id
+                RETURNING u.user)
+            SELECT DISTINCT user FROM r",
+            guild_id,channel_id,message_id
+        ).fetch_all(database.db()).await?;
+        for user in affected_users{
+             let guild_id = GuildId::from(guild_id as u64);
+                // Get the member
+                let mut member = guild_id.member(&ctx, user as u64).await?;
 
-        // Delete possible reaction emojis
-        database
-            .client
-            .execute(
-                "
-        DELETE FROM score_reactions
-        WHERE guild = $1::BIGINT AND channel = $2::BIGINT AND message = $3::BIGINT
-        ",
-                &[&guild_db_id, &channel_db_id, &message_db_id],
-            )
-            .await?;
-
-        // Update the roles of the user
-        let message = channel_id
-            .message(&ctx.http, removed_from_message_id)
-            .await?;
-        let mut member = guild_id.member(&ctx, message.author.id).await?;
-        update_roles(&ctx, &database, &mut member).await?;
-
-        let message = channel_id
-            .message(&ctx.http, removed_from_message_id)
-            .await?;
-        auto_moderate(&ctx, &database, guild_id, message).await?;
+            // Update the roles of the user
+            update_roles(&ctx, &database, &mut member).await?
+        }
     }
 
     Ok(())
@@ -350,50 +324,47 @@ pub async fn reaction_remove_all(
 async fn get_emoji_id(
     emoji: &ReactionType,
     database: &Database,
-) -> Result<Option<i32>, KowalskiError> {
-    let rows = match emoji {
+) -> Result<Option<i64>, KowalskiError> {
+    let result = match emoji {
         ReactionType::Unicode(string) => {
-            database
-                .client
-                .query(
-                    "
+            query_scalar!(
+                "
                 SELECT id FROM emojis
-                WHERE unicode = $1::TEXT
+                WHERE unicode = $1
                 ",
-                    &[string],
-                )
-                .await?
+                string,
+            )
+            .fetch_optional(database.db())
+            .await?
         }
         ReactionType::Custom { id: emoji_id, .. } => {
-            database
-                .client
-                .query(
-                    "
+            query_scalar!(
+                "
                     SELECT id FROM emojis
-                    WHERE guild_emoji = $1::BIGINT
+                    WHERE guild_emoji = $1
                     ",
-                    &[&(emoji_id.0 as i64)],
-                )
-                .await?
+                emoji_id.0 as i64
+            )
+            .fetch_optional(database.db())
+            .await?
         }
         _ => unreachable!(),
     };
-
-    Ok(rows.first().map(|row| row.get(0)))
+    Ok(result)
 }
 
 async fn get_reaction_data(
     ctx: &Context,
     reaction: &Reaction,
-) -> Result<(GuildId, UserId, UserId, ChannelId, MessageId), KowalskiError> {
-    let guild_id = reaction.guild_id.unwrap();
-    let user_from_id = reaction.user_id.unwrap();
+) -> Result<(i64, i64, i64, i64, i64), KowalskiError> {
+    let guild_id = reaction.guild_id.unwrap().0 as i64;
+    let user_from_id = reaction.user_id.unwrap().0 as i64;
     let user_to_id = {
         let message = reaction.message(&ctx.http).await?;
-        message.author.id
+        message.author.id.0 as i64
     };
-    let channel_id = reaction.channel_id;
-    let message_id = reaction.message_id;
+    let channel_id = reaction.channel_id.0 as i64;
+    let message_id = reaction.message_id.0 as i64;
 
     Ok((guild_id, user_from_id, user_to_id, channel_id, message_id))
 }

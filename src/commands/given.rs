@@ -41,11 +41,10 @@ pub async fn execute(
         &command.user
     };
 
-    let guild_id = command.guild_id.unwrap();
+    let guild_id = command.guild_id.unwrap().0 as i64;
 
     // Get guild id
-    let guild_db_id = database.get_guild(guild_id).await?;
-    let user_db_id = user.id.0 as i64;
+    let user_id = user.id.0 as i64;
 
     // Analyze reactions from the user
     let (upvotes, downvotes) = {
@@ -53,12 +52,11 @@ pub async fn execute(
             "
         SELECT SUM(CASE WHEN upvote THEN 1 END) upvotes,
         SUM(CASE WHEN NOT upvote THEN 1 END) downvotes
-        FROM score_reactions r
-        INNER JOIN score_emojis se ON r.emoji = se.id
-        WHERE r.guild=$1 AND user_from = $2;
+        FROM score_reactions_v
+        WHERE guild=$1 AND user_from = $2;
         ",
-            guild_db_id,
-            user_db_id
+            guild_id,
+            user_id
         )
         .fetch_one(database.db())
         .await?;
@@ -72,14 +70,13 @@ pub async fn execute(
     let emojis = {
         let rows = query!(
             "
-        SELECT unicode, guild_emoji,e.guild, COUNT(*) as count FROM score_reactions r
-        INNER JOIN emojis e ON r.emoji = e.id
-        WHERE r.guild = $1 AND user_from = $2
-        GROUP BY unicode, guild_emoji, e.guild
+        SELECT unicode, guild_emoji, emoji_source_guild, COUNT(*) as count FROM score_reactions_v
+        WHERE guild = $1 AND user_from = $2
+        GROUP BY unicode, guild_emoji, emoji_source_guild
         ORDER BY count DESC
         ",
-            guild_db_id,
-            user_db_id,
+            guild_id,
+            user_id,
         )
         .fetch_all(database.db())
         .await?;
@@ -108,15 +105,14 @@ pub async fn execute(
                 RANK() OVER (
                     ORDER BY COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) DESC, user_from
                 ) rank
-                FROM score_reactions r
-                INNER JOIN score_emojis se ON r.emoji = se.id
-                WHERE r.guild = $1::BIGINT
+                FROM score_reactions_v
+                WHERE guild = $1
                 GROUP BY user_from
             )
 
             SELECT rank FROM ranks
-            WHERE user_from = $2::BIGINT
-            ", guild_db_id, user_db_id).fetch_optional(database.db()).await?.flatten()
+            WHERE user_from = $2
+            ", guild_id, user_id).fetch_optional(database.db()).await?.flatten()
     };
     let rank = match rank {
         Some(rank) => rank.to_string(),
@@ -129,16 +125,15 @@ pub async fn execute(
         SELECT user_to, COUNT(*) FILTER (WHERE upvote) upvotes,
         COUNT(*) FILTER (WHERE NOT upvote) downvotes,
         SUM(CASE WHEN upvote THEN 1 ELSE -1 END) FILTER (WHERE NOT native) gifted
-        FROM score_reactions r
-        INNER JOIN score_emojis se ON r.emoji = se.id
-        WHERE r.guild = $1 AND user_from = $2
+        FROM score_reactions_v
+        WHERE guild = $1 AND user_from = $2
         GROUP BY user_to
         HAVING COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) >= 0
         ORDER BY COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) DESC
         LIMIT 5
         ",
-            guild_db_id,
-            &user_db_id
+            guild_id,
+            &user_id
         )
         .fetch_all(database.db())
         .await?;
@@ -146,7 +141,7 @@ pub async fn execute(
         rows.iter()
             .map(|row| {
                 (
-                    UserId(row.user_to as u64),
+                    UserId(row.user_to.unwrap() as u64),
                     row.upvotes.unwrap_or_default(),
                     row.downvotes.unwrap_or_default(),
                     row.gifted.unwrap_or_default(),
@@ -161,16 +156,15 @@ pub async fn execute(
         SELECT user_to, COUNT(*) FILTER (WHERE upvote) upvotes,
         COUNT(*) FILTER (WHERE NOT upvote) downvotes,
         SUM(CASE WHEN upvote THEN 1 ELSE -1 END) FILTER (WHERE NOT native) gifted
-        FROM score_reactions r
-        INNER JOIN score_emojis se ON r.emoji = se.id
-        WHERE r.guild = $1 AND user_from = $2
+        FROM score_reactions_v
+        WHERE guild = $1 AND user_from = $2
         GROUP BY user_to
         HAVING COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) < 0
         ORDER BY COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) ASC
         LIMIT 5
         ",
-            guild_db_id,
-            user_db_id,
+            guild_id,
+            user_id,
         )
         .fetch_all(database.db())
         .await?;
@@ -178,7 +172,7 @@ pub async fn execute(
         rows.iter()
             .map(|row| {
                 (
-                    UserId(row.user_to as u64),
+                    UserId(row.user_to.unwrap() as u64),
                     row.upvotes.unwrap_or_default(),
                     row.downvotes.unwrap_or_default(),
                     row.gifted.unwrap_or_default(),

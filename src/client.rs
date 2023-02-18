@@ -7,8 +7,9 @@ use tokio::sync::RwLock;
 use crate::model::Model;
 use crate::{
     config::Config, cooldowns::Cooldowns, credits::Credits, database::client::Database,
-    events::handler::Handler, history::History, strings::ERR_ENV_NOT_SET,
+    events::handler::Handler, history::History, strings::ERR_ENV_NOT_SET, error::KowalskiError,
 };
+
 
 /// The bot client.
 pub struct Client {
@@ -16,7 +17,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn default() -> Result<Self, Box<dyn Error>> {
+    pub async fn default() -> Result<Self,KowalskiError> {
         // Get bot token
         let token = env::var("BOT_TOKEN").expect(&format!("{}: {}", ERR_ENV_NOT_SET, "BOT_TOKEN"));
 
@@ -24,7 +25,7 @@ impl Client {
         Client::new(token).await
     }
 
-    pub async fn new(token: String) -> Result<Self, Box<dyn Error>> {
+    pub async fn new(token: String) -> Result<Self,KowalskiError> {
         // Get bot application id
         let id = env::var("BOT_ID")
             .expect(&format!("{}: {}", ERR_ENV_NOT_SET, "BOT_ID"))

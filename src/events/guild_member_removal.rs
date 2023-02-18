@@ -4,6 +4,7 @@ use serenity::{
     builder::CreateActionRow,
     client::Context,
     model::{
+        channel,
         guild::Member,
         id::{ChannelId, GuildId},
         interactions::message_component::ButtonStyle,
@@ -11,13 +12,10 @@ use serenity::{
     },
     prelude::Mentionable,
 };
+use sqlx::{query, query_scalar};
 
 use crate::{
-    config::Config,
-    data,
-    database::{client::Database, types::ModuleStatus},
-    error::KowalskiError,
-    utils::create_embed,
+    config::Config, data, database::client::Database, error::KowalskiError, utils::create_embed,
 };
 
 pub async fn guild_member_removal(
@@ -34,57 +32,43 @@ pub async fn guild_member_removal(
     let user_db_id = user.id.0 as i64;
 
     // Get guild status
-    let status = database
-        .client
-        .query_opt(
-            "
-                SELECT status
-                FROM modules
-                WHERE guild = $1::BIGINT
-                ",
-            &[&guild_db_id],
-        )
+    let score_enabled = query_scalar!("SELECT score FROM modules WHERE guild = $1", guild_db_id)
+        .fetch_optional(database.db())
         .await?
-        .map_or(ModuleStatus::default(), |row| row.get(0));
+        .unwrap_or(false);
 
     // Check if the score module is enabled
-    if status.score {
+    if score_enabled {
         // Select a random channel to send the message to
-        let channel = {
-            let row = database
-                .client
-                .query_opt(
-                    "
-                    SELECT channel FROM score_drops
-                    WHERE guild = $1::BIGINT
-                    OFFSET FLOOR(RANDOM() * (SELECT COUNT(*) FROM score_drops WHERE guild = $1::BIGINT))
-                    LIMIT 1
-                    ",
-                    &[&guild_db_id],
-                )
-                .await?;
-
-            row.map(|row| ChannelId(row.get::<_, i64>(0) as u64))
-        };
+        let channel = query_scalar!(
+            "
+            SELECT channel FROM score_drops_v
+            WHERE guild = $1
+            OFFSET FLOOR(RANDOM() * (SELECT COUNT(*) FROM score_drops_v WHERE guild = $1))
+            LIMIT 1
+            ",
+            guild_db_id
+        )
+        .fetch_optional(database.db())
+        .await?
+        .flatten()
+        .map(|id| ChannelId(id as u64));
 
         if let Some(channel) = channel {
             // Get the score of the user
-            let score = {
-                let row = database
-                    .client
-                    .query_one(
-                        "
+            let score = query_scalar!(
+                "
                         SELECT SUM(CASE WHEN upvote THEN 1 ELSE -1 END) score
-                        FROM score_reactions r
-                        INNER JOIN score_emojis se ON r.guild = se.guild AND r.emoji = se.emoji
-                        WHERE r.guild = $1::BIGINT AND user_to = $2::BIGINT
+                        FROM score_reactions_v
+                        WHERE guild = $1 AND user_to = $2
                         ",
-                        &[&guild_db_id, &user_db_id],
-                    )
-                    .await?;
-
-                row.get::<_, Option<i64>>(0).unwrap_or_default()
-            };
+                guild_db_id,
+                user_db_id
+            )
+            .fetch_optional(database.db())
+            .await?
+            .flatten()
+            .unwrap_or_default();
 
             let title = format!("User {} has dropped a score of {}", user.name, score);
 
@@ -127,17 +111,12 @@ pub async fn guild_member_removal(
                         database.get_user(guild_id, interaction.user.id).await?;
 
                     // Move the reactions to the other user
-                    database
-                        .client
-                        .execute(
-                            "
+                    query!("
                             UPDATE score_reactions
-                            SET user_to = $3::BIGINT, native = false
-                            WHERE guild = $1::BIGINT AND user_to = $2::BIGINT
-                            ",
-                            &[&guild_db_id, &user_db_id, &interaction_user_db_id],
-                        )
-                        .await?;
+                            SET user_to = $3, native = false
+                            FROM users u
+                            WHERE u.id = user_to AND u.guild = $1 AND u.user = $2
+                            ",guild_db_id,user_db_id,interaction_user_db_id).execute(database.db()).await?;
 
                     let embed = create_embed(
                         &title,

@@ -33,8 +33,8 @@ impl Cooldowns {
         &mut self,
         config: &Config,
         database: &Database,
-        guild_id: GuildId,
-        user_id: UserId,
+        guild_id: i64,
+        user_id: i64,
         roles: &[RoleId],
     ) -> Result<bool, KowalskiError> {
         // Get or create guild cooldowns

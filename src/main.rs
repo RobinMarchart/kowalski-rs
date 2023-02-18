@@ -20,14 +20,15 @@ use std::error::Error;
 
 use tracing::error;
 
-use kowalski_rs::{client::Client, strings::ERR_CLIENT};
+use crate::{client::Client, strings::ERR_CLIENT};
 use tracing_log::LogTracer;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     LogTracer::init()?;
 
+    dotenvy::dotenv()?;
     // Create kowalski
     let mut kowalski = Client::default().await?;
 

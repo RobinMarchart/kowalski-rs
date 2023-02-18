@@ -1,10 +1,10 @@
-use sea_orm::EntityTrait;
 use serenity::{
     client::Context,
     model::guild::{Guild, UnavailableGuild},
 };
+use sqlx::query;
 
-use crate::{data, database::client::Database,database::entity::prelude::Guilds, error::KowalskiError};
+use crate::{data, database::client::Database, error::KowalskiError};
 
 pub async fn guild_delete(
     ctx: &Context,
@@ -17,10 +17,10 @@ pub async fn guild_delete(
         let database = data!(ctx, Database);
 
         // Get guild id
-        let guild_db_id = incomplete.id.0 as i64;
+        let guild_id = incomplete.id.0 as i64;
 
-        Guilds::delete_by_id(guild_db_id).exec(&database).await?;
-
+        query!("DELETE FROM guilds WHERE guild = $1",guild_id)
+            .execute(database.db()).await?;
     }
 
     Ok(())

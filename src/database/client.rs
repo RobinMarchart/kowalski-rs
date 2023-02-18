@@ -398,5 +398,5 @@ impl Database {
 }
 
 impl TypeMapKey for Database {
-    type Value = Database;
+    type Value = std::sync::Arc<Database>;
 }
