@@ -2,6 +2,7 @@ use std::str::FromStr;
 use std::{cmp::min, time::Duration};
 
 use chrono::{DateTime, Utc};
+use serenity::futures::TryStreamExt;
 use serenity::{
     builder::CreateActionRow,
     client::Context,
@@ -19,6 +20,7 @@ use serenity::{
     },
     prelude::Mentionable,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -27,7 +29,6 @@ use crate::{
     database::client::Database,
     error::KowalskiError,
     error::KowalskiError::DiscordApiError,
-    row_id,
     strings::ERR_CMD_ARGS_INVALID,
     utils::{parse_arg_resolved, send_response, send_response_complex},
 };
@@ -81,55 +82,47 @@ pub async fn execute(
             // Get user id
             let user_db_id = database.get_user(guild_id, user.id).await?;
 
-            let rows = database
-                .client
-                .query(
-                    "
-            SELECT channel, time, content
-            FROM reminders
-            WHERE guild = $1::BIGINT AND \"user\" = $2::BIGINT
+            query!(
+                "
+            SELECT c.channel, r.time, r.content
+            FROM reminders r
+            INNER JOIN messages m ON r.message=m.id
+            INNER JOIN channels c ON m.channel=c.id
+            WHERE \"user\" = $1
             ORDER BY time
             ",
-                    &[&guild_db_id, &user_db_id],
-                )
-                .await?;
-
-            rows.iter()
-                .map(|row| {
-                    (
-                        row_id!(ChannelId, row, 0),
-                        None,
-                        row.get::<_, DateTime<Utc>>(1),
-                        row.get(2),
-                    )
-                })
-                .collect()
+                user_db_id,
+            )
+            .fetch(database.db())
+            .map_ok(|row| (ChannelId(row.channel as u64), None, row.time, row.content))
+            .try_collect()
+            .await?
         }
         None => {
             // Query the next reminder_list_size reminders
-            let rows = database
-                .client
-                .query(
-                    "
-            SELECT channel, \"user\", time, content
-            FROM reminders
-            WHERE guild = $1::BIGINT
+            query!(
+                r#"
+            SELECT c.channel, u."user", r.time, r.content
+            FROM reminders r
+            INNER JOIN messages m ON r.message=m.id
+            INNER JOIN channels c ON m.channel=c.id
+            INNER JOIN users u ON r."user"=u.id
+            WHERE c.guild = $1
             ORDER BY time
-            ",
-                    &[&guild_db_id],
+            "#,
+                guild_db_id,
+            )
+            .fetch(database.db())
+            .map_ok(|row| {
+                (
+                    ChannelId(row.channel as u64),
+                    Some(UserId(row.user as u64)),
+                    row.time,
+                    row.content,
                 )
-                .await?;
-
-            rows.iter()
-                .map(|row| {
-                    (
-                        row_id!(ChannelId, row, 0),
-                        Some(row_id!(UserId, row, 1)),
-                        row.get::<_, DateTime<Utc>>(2),
-                        row.get(3),
-                    )
-                })
-                .collect()
+            })
+            .try_collect()
+            .await?
         }
     };
 

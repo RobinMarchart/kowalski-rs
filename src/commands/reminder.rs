@@ -2,6 +2,7 @@ use chrono::{Duration, Utc};
 use serenity::{
     client::Context, model::interactions::application_command::ApplicationCommandInteraction,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -77,22 +78,16 @@ pub async fn execute(
     let user_db_id = database.get_user(guild_id, command.user.id).await?;
 
     // Add reminder to database
-    database
-        .client
-        .execute(
-            "
-    INSERT INTO reminders
-    VALUES ($1::BIGINT, $2::BIGINT, $3::BIGINT, $4::BIGINT, $5::TIMESTAMPTZ, $6::TEXT)
-    ",
-            &[
-                &guild_db_id,
-                &channel_db_id,
-                &message_db_id,
-                &user_db_id,
-                &datetime,
-                &message,
-            ],
-        )
+    query!(
+            r#"
+    INSERT INTO reminders (message,"user",time,content)
+    VALUES ($1, $2, $3, $4)
+    "#,
+                message_db_id,
+                user_db_id,
+                datetime,
+                message,
+        ).execute(database.db())
         .await?;
 
     send_response(

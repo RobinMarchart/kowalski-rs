@@ -1,9 +1,11 @@
 use itertools::Itertools;
 use serenity::{
     client::Context,
+    futures::TryStreamExt,
     model::{id::RoleId, interactions::application_command::ApplicationCommandInteraction},
     prelude::Mentionable,
 };
+use sqlx::query;
 
 use crate::{
     config::Command, data, database::client::Database, error::KowalskiError, utils::send_response,
@@ -20,26 +22,22 @@ pub async fn execute(
     let guild_id = command.guild_id.unwrap();
 
     // Get guild id
-    let guild_db_id = database.get_guild(guild_id).await?;
+    let guild_db_id = guild_id.0 as i64;
 
     // Get roles and their respective cooldowns
-    let role_cooldowns: Vec<_> = {
-        let rows = database
-            .client
-            .query(
-                "
-                SELECT role, score FROM score_roles
-                WHERE guild = $1::BIGINT
+    let role_cooldowns: Vec<_> = query!(
+        "
+                SELECT r.role, score FROM score_roles sc
+                INNER JOIN roles r ON r.id = sc.role
+                WHERE r.guild = $1
                 ORDER BY score
                 ",
-                &[&guild_db_id],
-            )
-            .await?;
-
-        rows.iter()
-            .map(|row| (RoleId(row.get::<_, i64>(0) as u64), row.get::<_, i64>(1)))
-            .collect()
-    };
+        guild_db_id,
+    )
+    .fetch(database.db())
+    .map_ok(|row| (RoleId::from(row.role as u64), row.score))
+    .try_collect()
+    .await?;
 
     let levelup_roles = role_cooldowns
         .iter()

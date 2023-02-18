@@ -1,12 +1,13 @@
 use serenity::{
     client::Context, model::interactions::application_command::ApplicationCommandInteraction,
 };
+use sqlx::query_as;
 use strum::IntoEnumIterator;
 
 use crate::{
     config::{Command, Module},
     data,
-    database::{client::Database, types::ModuleStatus},
+    database::{client::Database, types::Modules},
     error::KowalskiError,
     utils::{send_failure, send_response_complex},
 };
@@ -35,21 +36,17 @@ pub async fn execute(
     let guild_id = command.guild_id.unwrap();
 
     // Get guild id
-    let guild_db_id = database.get_guild(guild_id).await?;
+    let guild_db_id = guild_id.0 as i64;
 
     // Get guild status
-    let status = database
-        .client
-        .query_opt(
-            "
-                SELECT status
+    let status = query_as!(Modules,
+            r#"SELECT owner,utility,score,reaction_roles,"analyze"
                 FROM modules
-                WHERE guild = $1::BIGINT
-                ",
-            &[&guild_db_id],
-        )
-        .await?
-        .map_or(ModuleStatus::default(), |row| row.get(0));
+                WHERE guild = $1
+                "#,
+            guild_db_id,
+        ).fetch_optional(database.db())
+        .await?.unwrap_or_default();
 
     let mut fields = Vec::new();
 

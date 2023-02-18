@@ -1,6 +1,7 @@
 use serenity::{
     client::Context, model::interactions::application_command::ApplicationCommandInteraction,
 };
+use sqlx::query_scalar;
 
 use crate::{
     config::Command, data, database::client::Database, error::KowalskiError, utils::send_response,
@@ -17,29 +18,25 @@ pub async fn execute(
     let guild_id = command.guild_id.unwrap();
 
     // Get guild id
-    let guild_db_id = database.get_guild(guild_id).await?;
+    let guild_db_id = guild_id.0 as i64;
 
-    let pin_score: Option<i64> = database
-        .client
-        .query_opt(
-            "
+    let pin_score: Option<i64> = query_scalar!(
+        "
             SELECT score FROM score_auto_pin
-            WHERE guild = $1::BIGINT",
-            &[&guild_db_id],
-        )
-        .await?
-        .map(|row| row.get(0));
+            WHERE guild = $1",
+        guild_db_id,
+    )
+    .fetch_optional(database.db())
+    .await?;
 
-    let delete_score: Option<i64> = database
-        .client
-        .query_opt(
-            "
+    let delete_score: Option<i64> = query_scalar!(
+        "
             SELECT score FROM score_auto_delete
-            WHERE guild = $1::BIGINT",
-            &[&guild_db_id],
-        )
-        .await?
-        .map(|row| row.get(0));
+            WHERE guild = $1",
+        guild_db_id,
+    )
+    .fetch_optional(database.db())
+    .await?;
 
     let mut content = format!("The following auto-moderation tools are available:\n\n");
 

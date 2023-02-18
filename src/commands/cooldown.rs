@@ -40,15 +40,17 @@ pub async fn execute(
 
         // Insert or update entry
         query!(
-                "
+            "
         INSERT INTO score_cooldowns(role,cooldown)
         VALUES ($1, $2)
         ON CONFLICT (role)
         DO UPDATE SET cooldown = $2
         ",
-                role_db_id, cooldown,
-            ).execute(database.db())
-            .await?;
+            role_db_id,
+            cooldown,
+        )
+        .execute(database.db())
+        .await?;
 
         send_response(
             &ctx,
@@ -65,13 +67,14 @@ pub async fn execute(
     } else {
         // Delete cooldown
         query!(
-                "
+            "
         DELETE FROM score_cooldowns
         WHERE role = $1
         ",
-                &role_db_id,
-            ).execute(database.db())
-            .await?;
+            &role_db_id,
+        )
+        .execute(database.db())
+        .await?;
 
         send_response(
             &ctx,

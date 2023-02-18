@@ -1,16 +1,19 @@
 use std::borrow::Cow;
 
+use itertools::Itertools;
 use serenity::{
     client::Context,
     model::{
         channel::AttachmentType, interactions::application_command::ApplicationCommandInteraction,
     },
+    futures::stream::{self,StreamExt,TryStreamExt}
 };
+use sqlx::{Executor, Statement, Column, Row};
 
 use crate::{
     config::{Command, Config},
     data,
-    database::{client::Database, types::TableResolved},
+    database::client::Database,
     error::KowalskiError,
     history::History,
     utils::{parse_arg, parse_arg_name, send_response},
@@ -30,7 +33,12 @@ pub async fn execute(
     let query = parse_arg(options, 0)?;
 
     // Execute SQL query
-    let result = database.client.query(query, &[]).await?;
+    let statement=database.db().prepare(query).await?;
+    let table:Vec<Vec<String>>=stream::once([Ok("".to_owned())].iter().chain( statement.columns().iter().map(|col|Ok::<KowalskiError>(col.name().to_owned()))).collect())
+        .concat(database.db().fetch(query).map_err(|e|e.into()).zip(stream::iter(0..)).map_ok(|(num,row)|[format!("{}",num)].into_iter().chain(
+            (0..row.len()).into_iter().map(|i|row.try_get_raw(i).as_str())
+            )));
+
     let resolved = TableResolved::new(ctx, result).await;
 
     // Add query to history

@@ -7,12 +7,13 @@ use std::{
 use serenity::{
     client::Context, model::interactions::application_command::ApplicationCommandInteraction,
 };
+use sqlx::{query, query_as};
 use tokio::sync::Mutex;
 
 use crate::{
     config::{Command, Config, Module},
     data,
-    database::{client::Database, types::ModuleStatus},
+    database::{client::Database, types::Modules},
     error::KowalskiError,
     error::KowalskiError::DiscordApiError,
     strings::ERR_CMD_ARGS_INVALID,
@@ -107,77 +108,60 @@ pub async fn execute(
     // Get guild id
     let guild_db_id = database.get_guild(guild_id).await?;
 
-    // Get the status, modify it and update it in the database if necessary
-    let status: Option<ModuleStatus> = {
-        let _mutex = LOCK.lock().await;
+    query!(
+        "INSERT INTO modules(guild) VALUES ($1) ON CONFLICT DO NOTHING",
+        guild_db_id
+    )
+    .execute(database.db())
+    .await?;
 
-        // Get current guild status
-        let status: ModuleStatus = {
-            let row = database
-                .client
-                .query_opt(
-                    "SELECT status FROM modules WHERE guild = $1::BIGINT",
-                    &[&guild_db_id],
-                )
-                .await?;
+    // Update the status object
+    let enable = matches!(action, Action::Enable);
+    let changed = 1
+        == match module {
+            Module::Owner => query!(
+                "UPDATE modules SET owner = $1 WHERE guild = $2 AND NOT owner = $1;",
+                enable,
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?
+            .rows_affected(),
+            Module::Utility => query!(
+                "UPDATE modules SET utility = $1 WHERE guild = $2 AND NOT utility = $1;",
+                enable,
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?
+            .rows_affected(),
+            Module::Score => query!(
+                "UPDATE modules SET score = $1 WHERE guild = $2 AND NOT score = $1;",
+                enable,
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?
+            .rows_affected(),
 
-            match row {
-                Some(row) => row.get(0),
-                None => {
-                    database
-                        .client
-                        .execute(
-                            "
-                        INSERT INTO modules
-                        VALUES ($1::BIGINT, B'00000000')
-                        ",
-                            &[&guild_db_id],
-                        )
-                        .await?;
+            Module::ReactionRoles => query!(
+            "UPDATE modules SET reaction_roles = $1 WHERE guild = $2 AND NOT reaction_roles = $1;",
+            enable,
+            guild_db_id
+        )
+            .execute(database.db())
+            .await?
+            .rows_affected(),
 
-                    ModuleStatus::default()
-                }
-            }
+            Module::Analyze => query!(
+                r#"UPDATE modules SET "analyze" = $1 WHERE guild = $2 AND NOT "analyze" = $1;"#,
+                enable,
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?
+            .rows_affected(),
         };
-
-        // Copy status to compare it to the old status later
-        let mut status_new = status.clone();
-
-        // Update the status object
-        let enable = matches!(action, Action::Enable);
-        match module {
-            Module::Owner => status_new.owner = enable,
-            Module::Utility => status_new.utility = enable,
-            Module::Score => status_new.score = enable,
-            Module::ReactionRoles => status_new.reaction_roles = enable,
-            Module::Analyze => status_new.analyze = enable,
-        };
-
-        // Check whether the status has changed
-        if status != status_new {
-            // Update the object in the database so we can drop the lock
-
-            // Get guild id
-            let guild_db_id = database.get_guild(guild_id).await?;
-
-            // Update the database entry
-            database
-                .client
-                .execute(
-                    "
-            UPDATE modules
-            SET status = $1::BIT(8)
-            WHERE guild = $2::BIGINT
-            ",
-                    &[&status_new, &guild_db_id],
-                )
-                .await?;
-
-            Some(status_new)
-        } else {
-            None
-        }
-    };
 
     // Get title of the embed
     let title = format!("{} module '{:?}'", action, module);
@@ -244,6 +228,39 @@ pub async fn execute(
             }
         }
     }
+    if changed {
+        send_response(
+            ctx,
+            command,
+            command_config,
+            &title,
+            "I'm updating the module... This can take some time.",
+        )
+        .await?;
+
+        // Update the guild commands
+
+        let modules = query_as!(
+            Modules,
+            r#"
+SELECT owner,utility,score,reaction_roles,"analyze"
+FROM modules WHERE guild=$1;"#,
+            guild_db_id
+        )
+        .fetch_one(database.db())
+        .await?;
+
+        create_module_command(ctx, &config, guild_id, &modules).await;
+
+        send_response(
+            ctx,
+            command,
+            command_config,
+            &title,
+            "I have updated the module.",
+        )
+        .await
+    }
 }
 
 async fn remove(
@@ -255,6 +272,7 @@ async fn remove(
 ) -> Result<(), KowalskiError> {
     // Get database
     let database = data!(ctx, Database);
+    let transaction = database.begin().await?;
 
     let guild_id = command.guild_id.unwrap();
 
@@ -263,47 +281,68 @@ async fn remove(
 
     match module {
         Module::Utility => {
-            database
-                .client
-                .execute(
-                    "
-                    DELETE FROM publishing WHERE guild = $1::BIGINT;
-
-                    DELETE FROM reminders WHERE guild = $1::BIGINT;
-                    ",
-                    &[&guild_db_id],
-                )
+            query!("DELETE FROM publishing WHERE guild = $1;", guild_db_id)
+                .execute(database.db())
                 .await?;
+
+            query!(
+                r#"DELETE FROM reminders WHERE id=
+(SELECT r.id FROM reminders r INNER JOIN users u ON r."user"=u.id WHERE u.guild=$1);"#,
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
         }
         Module::Score => {
-            database
-                .client
-                .execute(
-                    "
-                    DELETE FROM score_auto_delete WHERE guild = $1::BIGINT;
+            query!(
+                "DELETE FROM score_auto_delete WHERE guild = $1;",
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
 
-                    DELETE FROM score_auto_pin WHERE guild = $1::BIGINT;
+            query!(
+                "DELETE FROM score_auto_pin WHERE guild = $1::BIGINT;",
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
 
-                    DELETE FROM score_cooldowns WHERE guild = $1::BIGINT;
+            query!(
+                "DELETE FROM score_cooldowns WHERE role IN (SELECT id FROM roles WHERE guild=$1);",
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
 
-                    DELETE FROM score_drops WHERE guild = $1::BIGINT;
+            query!(
+                "DELETE FROM score_drops WHERE channel IN (SELECT id FROM channels WHERE guild=$1);",
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
 
-                    DELETE FROM score_emojis WHERE guild = $1::BIGINT;
+            query!(
+                "DELETE FROM score_emojis WHERE guild = $1::BIGINT;",
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
 
-                    DELETE FROM score_roles WHERE guild = $1::BIGINT;
-                    ",
-                    &[&guild_db_id],
-                )
-                .await?;
+            query!(
+                "DELETE FROM score_roles WHERE role IN (SELECT id FROM roles WHERE guild=$1);",
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
         }
         Module::ReactionRoles => {
-            database
-                .client
-                .execute(
-                    "DELETE FROM reminders WHERE guild = $1::BIGINT",
-                    &[&guild_db_id],
-                )
-                .await?;
+            query!(
+                r#"DELETE FROM reminders WHERE "user" IN (SELECT id FROM users WHERE guild=$1);"#,
+                guild_db_id
+            )
+            .execute(database.db())
+            .await?;
         }
         _ => {
             return send_response(
@@ -316,6 +355,8 @@ async fn remove(
             .await;
         }
     }
+
+    transaction.commit().await?;
 
     send_response(
         ctx,

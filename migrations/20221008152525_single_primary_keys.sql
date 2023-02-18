@@ -203,7 +203,7 @@ ALTER TABLE reminders DROP CONSTRAINT reminders_pkey;
 ALTER TABLE reminders DROP COLUMN guild;
 ALTER TABLE reminders DROP COLUMN channel;
 ALTER TABLE reminders ADD PRIMARY KEY(id);
-ALTER TABLE reminders ADD CONSTRAINT unique_reminders UNIQUE(message,"user");
+ALTER TABLE reminders ADD CONSTRAINT unique_reminders UNIQUE(message,"user","time",content);
 ALTER TABLE reminders ALTER COLUMN message SET NOT NULL;
 ALTER TABLE reminders ALTER COLUMN "user" SET NOT NULL;
 ALTER TABLE reminders ALTER COLUMN time SET NOT NULL;

@@ -10,6 +10,7 @@ use serenity::{
     },
     prelude::Mentionable,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -75,17 +76,15 @@ pub async fn execute(
 
     match action {
         Action::Add => {
-            database
-                .client
-                .execute(
+            query!(
                     "
-            INSERT INTO score_roles
-            VALUES($1::BIGINT, $2::BIGINT, $3::BIGINT)
+            INSERT INTO score_roles (role,score)
+            VALUES($1, $2)
             ON CONFLICT
             DO NOTHING
             ",
-                    &[&guild_db_id, &role_db_id, &score],
-                )
+                    role_db_id, score,
+                ).execute(database.db())
                 .await?;
 
             send_response(
@@ -102,16 +101,14 @@ pub async fn execute(
             .await
         }
         Action::Remove => {
-            let modified = database
-                .client
-                .execute(
+            let modified = query!(
                     "
             DELETE FROM score_roles
-            WHERE guild = $1::BIGINT AND role = $2::BIGINT AND score = $3::BIGINT
+            WHERE role = $1 AND score = $2
             ",
-                    &[&guild_db_id, &role_db_id, &score],
-                )
-                .await?;
+                    role_db_id, score,
+                ).execute(database.db())
+                .await?.rows_affected();
 
             if modified == 0 {
                 send_response(

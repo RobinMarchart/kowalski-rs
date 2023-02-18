@@ -7,6 +7,7 @@ use rand::Rng;
 use serenity::{
     client::Context, model::interactions::application_command::ApplicationCommandInteraction,
 };
+use sqlx::{query, query_scalar};
 
 use crate::{
     config::{Command, Config},
@@ -68,20 +69,15 @@ pub async fn execute(
 
     match action {
         Action::Enable => {
-            let id = {
-                let row = database
-                    .client
-                    .query_opt(
-                        "
+            let id = query_scalar!(
+                "
                 SELECT id FROM publishing
                 WHERE guild = $1::BIGINT
             ",
-                        &[&guild_db_id],
-                    )
-                    .await?;
-
-                row.map(|row| row.get::<_, String>(0))
-            };
+                guild_db_id,
+            )
+            .fetch_optional(database.db())
+            .await?;
 
             match id {
                 Some(id) => {
@@ -114,15 +110,13 @@ pub async fn execute(
                             .collect()
                     };
 
-                    database
-                        .client
-                        .execute(
+                    query!(
                             "
                         INSERT INTO publishing
                         VALUES($1::TEXT, $2::BIGINT)
                         ",
-                            &[&id, &guild_db_id],
-                        )
+                            id, guild_db_id,
+                        ).execute(database.db())
                         .await?;
 
                     send_response(
@@ -143,15 +137,13 @@ pub async fn execute(
             }
         }
         Action::Disable => {
-            database
-                .client
-                .execute(
+            query!(
                     "
             DELETE FROM publishing
             WHERE guild = $1::BIGINT
             ",
-                    &[&guild_db_id],
-                )
+                    guild_db_id,
+                ).execute(database.db())
                 .await?;
 
             send_response(

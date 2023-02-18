@@ -6,6 +6,7 @@ use std::{
 use serenity::{
     client::Context, model::interactions::application_command::ApplicationCommandInteraction,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -72,30 +73,30 @@ pub async fn execute(
         // Insert or update entry
         match moderation {
             Moderation::Pin => {
-                database
-                    .client
-                    .execute(
-                        "
-                        INSERT INTO score_auto_pin
-                        VALUES ($1::BIGINT, $2::BIGINT)
-                        ON CONFLICT (guild) DO UPDATE SET score = $2::BIGINT
+                query!(
+                    "
+                        INSERT INTO score_auto_pin(guild,score)
+                        VALUES ($1, $2)
+                        ON CONFLICT (guild) DO UPDATE SET score = $2
                         ",
-                        &[&guild_db_id, &score],
-                    )
-                    .await?;
+                    guild_db_id,
+                    score,
+                )
+                .execute(database.db())
+                .await?;
             }
             Moderation::Delete => {
-                database
-                    .client
-                    .execute(
-                        "
-                        INSERT INTO score_auto_delete
-                        VALUES ($1::BIGINT, $2::BIGINT)
-                        ON CONFLICT (guild) DO UPDATE SET score = $2::BIGINT
+                query!(
+                    "
+                        INSERT INTO score_auto_delete(guild,score)
+                        VALUES ($1, $2)
+                        ON CONFLICT (guild) DO UPDATE SET score = $2
                         ",
-                        &[&guild_db_id, &score],
-                    )
-                    .await?;
+                    guild_db_id,
+                    score,
+                )
+                .execute(database.db())
+                .await?;
             }
         }
 
@@ -114,27 +115,23 @@ pub async fn execute(
         // Delete moderation
         match moderation {
             Moderation::Pin => {
-                database
-                    .client
-                    .execute(
+                query!(
                         "
                         DELETE FROM score_auto_pin
-                        WHERE guild = $1::BIGINT
+                        WHERE guild = $1
                         ",
-                        &[&guild_db_id],
-                    )
+                        guild_db_id,
+                    ).execute(database.db())
                     .await?;
             }
             Moderation::Delete => {
-                database
-                    .client
-                    .execute(
+                query!(
                         "
                         DELETE FROM score_auto_delete
-                        WHERE guild = $1::BIGINT
+                        WHERE guild = $1
                         ",
-                        &[&guild_db_id],
-                    )
+                        guild_db_id,
+                    ).execute(database.db())
                     .await?;
             }
         }

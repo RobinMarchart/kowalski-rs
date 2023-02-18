@@ -15,6 +15,7 @@ use serenity::{
     },
     prelude::Mentionable,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -122,9 +123,7 @@ pub async fn execute(
                     let emoji = database.get_emoji(guild_id, &reaction.emoji).await?;
 
                     // Get the guild, role, channel and message ids
-                    let guild_db_id = database.get_guild(guild_id).await?;
                     let role_db_id = database.get_role(guild_id, role.id).await?;
-                    let channel_db_id = database.get_channel(guild_id, reaction.channel_id).await?;
                     let message_db_id = database
                         .get_message(guild_id, reaction.channel_id, reaction.message_id)
                         .await?;
@@ -132,26 +131,20 @@ pub async fn execute(
                     match action {
                         Action::Add => {
                             // Insert into the database if there is no entry yet
-                            database
-                                .client
-                                .execute(
-                                    "
-                                INSERT INTO reaction_roles
-                                VALUES ($1::BIGINT, $2::BIGINT, $3::BIGINT, $4::INT, $5::BIGINT,
-                                    $6::BIGINT)
-                                ON CONFLICT (guild, channel, message, emoji, role)
-                                DO UPDATE SET slots = $6::BIGINT
+                            query!(
+                                "
+                                INSERT INTO reaction_roles(message,emoji,role,slots)
+                                VALUES ($1, $2, $3, $4)
+                                ON CONFLICT (message, emoji, role)
+                                DO UPDATE SET slots = $4
                                 ",
-                                    &[
-                                        &guild_db_id,
-                                        &channel_db_id,
-                                        &message_db_id,
-                                        &emoji,
-                                        &role_db_id,
-                                        &slots,
-                                    ],
-                                )
-                                .await?;
+                                message_db_id,
+                                emoji,
+                                role_db_id,
+                                slots,
+                            )
+                            .execute(database.db())
+                            .await?;
 
                             // React to the message
                             let message = reaction.message(&ctx.http).await?;
@@ -171,23 +164,17 @@ pub async fn execute(
                             send_response(ctx, command, command_config, &title, &content).await
                         }
                         Action::Remove => {
-                            database
-                                .client
-                                .execute(
-                                    "
+                            query!(
+                                "
                             DELETE FROM reaction_roles
-                            WHERE guild = $1::BIGINT AND channel = $2::BIGINT
-                            AND message = $3::BIGINT AND emoji = $4::INT AND role = $5::BIGINT
+                            WHERE message = $1 AND emoji = $2 AND role = $3
                             ",
-                                    &[
-                                        &guild_db_id,
-                                        &channel_db_id,
-                                        &message_db_id,
-                                        &emoji,
-                                        &role_db_id,
-                                    ],
-                                )
-                                .await?;
+                                message_db_id,
+                                emoji,
+                                role_db_id,
+                            )
+                            .execute(database.db())
+                            .await?;
 
                             // Remove the reactions of the message
                             let message = reaction.message(&ctx.http).await?;

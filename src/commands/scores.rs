@@ -10,8 +10,9 @@ use serenity::{
             application_command::ApplicationCommandInteraction, message_component::ButtonStyle,
         },
     },
-    prelude::Mentionable,
+    prelude::Mentionable, futures::TryStreamExt,
 };
+use sqlx::query;
 
 use crate::{
     config::Command,
@@ -53,37 +54,29 @@ pub async fn execute(
     let guild_db_id = database.get_guild(command.guild_id.unwrap()).await?;
 
     // Get top users
-    let top: Vec<_> = {
-        let rows = database
-            .client
-            .query(
-                "
-        SELECT user_to, COUNT(*) FILTER (WHERE upvote) upvotes,
+    let top: Vec<_> = query!(
+        "
+        SELECT u.user, COUNT(*) FILTER (WHERE upvote) upvotes,
         COUNT(*) FILTER (WHERE NOT upvote) downvotes
         FROM score_reactions r
-        INNER JOIN score_emojis se ON r.guild = se.guild AND r.emoji = se.emoji
-        WHERE r.guild = $1::BIGINT
-        GROUP BY user_to
-        ORDER BY COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) DESC, user_to
+        INNER JOIN score_emojis se ON r.emoji = se.id
+        INNER JOIN users u on r.user_to = u.id
+        WHERE u.guild = $1
+        GROUP BY u.user
+        ORDER BY COUNT(*) FILTER (WHERE upvote) - COUNT(*) FILTER (WHERE NOT upvote) DESC, u.user
         ",
-                &[&guild_db_id],
-            )
-            .await?;
-
-        rows.iter()
-            .map(|row| {
-                let user: i64 = row.get(0);
-                let upvotes: Option<i64> = row.get(1);
-                let downvotes: Option<i64> = row.get(2);
-
-                (
-                    UserId(user as u64),
-                    upvotes.unwrap_or_default(),
-                    downvotes.unwrap_or_default(),
-                )
-            })
-            .collect()
-    };
+        guild_db_id,
+    )
+    .fetch(database.db())
+    .map_ok(|row| {
+        (
+            UserId(row.user as u64),
+            row.upvotes.unwrap_or_default(),
+            row.downvotes.unwrap_or_default(),
+        )
+    })
+    .try_collect()
+    .await?;
 
     if top.is_empty() {
         send_response(

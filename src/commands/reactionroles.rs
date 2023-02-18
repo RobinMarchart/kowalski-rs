@@ -4,10 +4,11 @@ use serenity::{
     model::{
         channel::ReactionType,
         id::{ChannelId, EmojiId, MessageId, RoleId},
-        interactions::application_command::ApplicationCommandInteraction,
+        interactions::application_command::ApplicationCommandInteraction, prelude::GuildId,
     },
-    prelude::Mentionable,
+    prelude::Mentionable, futures::TryStreamExt,
 };
+use sqlx::query;
 
 use crate::{
     config::Command, data, database::client::Database, error::KowalskiError, pluralize,
@@ -25,52 +26,37 @@ pub async fn execute(
     let guild_id = command.guild_id.unwrap();
 
     // Get guild id
-    let guild_db_id = database.get_guild(guild_id).await?;
+    let guild_db_id = guild_id.0 as i64;
 
     // Get reaction roles
-    let roles = {
-        let rows = database
-            .client
-            .query(
+    let roles:Vec<_> =query!(
                 "
-                SELECT channel, message, unicode, guild_emoji, role, slots
+                SELECT c.channel, m.message, e.unicode, e.guild_emoji, e.guild as guild_emoji_guild, r.role, rr.slots
                 FROM reaction_roles rr
-                INNER JOIN emojis e ON emoji = id
-                WHERE rr.guild = $1::BIGINT
+                INNER JOIN emojis e ON rr.emoji = e.id
+                INNER JOIN messages m ON rr.message = m.id
+                INNER JOIN channels c ON m.channel = c.id
+                INNER JOIN roles r ON rr.role = r.id
+                WHERE c.guild = $1
                 ORDER BY channel, message
                 ",
-                &[&guild_db_id],
-            )
+                guild_db_id,
+            ).fetch(database.db()).map_err(|e|e.into())
+            .and_then(|row|async move{Ok::<_,KowalskiError>((
+                ChannelId(row.channel as u64),
+                MessageId(row.message as u64),
+                match(row.unicode,row.guild_emoji,row.guild_emoji_guild){
+                    (Some(string),..)=>ReactionType::Unicode(string),
+                    (_,Some(id),Some(guild))=>GuildId(guild as u64)
+                        .emoji(ctx, EmojiId(id as u64)).await?.into(),
+                    _=>unreachable!(),
+                },
+                RoleId(row.role as u64),
+                row.slots
+            ))}).try_collect()
             .await?;
 
-        let mut roles = Vec::new();
 
-        for row in rows {
-            let channel_id = ChannelId(row.get::<_, i64>(0) as u64);
-            let message_id = MessageId(row.get::<_, i64>(1) as u64);
-            let unicode: Option<String> = row.get(2);
-            let guild_emoji: Option<i64> = row.get(3);
-            let emoji = match (unicode, guild_emoji) {
-                (Some(string), _) => ReactionType::Unicode(string),
-                (_, Some(id)) => {
-                    let emoji = guild_id.emoji(&ctx.http, EmojiId(id as u64)).await?;
-
-                    ReactionType::Custom {
-                        animated: emoji.animated,
-                        id: emoji.id,
-                        name: Some(emoji.name),
-                    }
-                }
-                _ => unreachable!(),
-            };
-            let role_id = RoleId(row.get::<_, i64>(4) as u64);
-            let slots: Option<i32> = row.get(5);
-
-            roles.push((channel_id, message_id, emoji, role_id, slots));
-        }
-
-        roles
-    };
 
     let roles = roles
         .iter()

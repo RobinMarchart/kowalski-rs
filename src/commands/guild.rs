@@ -8,6 +8,7 @@ use serde_json::json;
 use serenity::{
     builder::CreateActionRow,
     client::Context,
+    futures::TryStreamExt,
     http::Http,
     model::{
         channel::{ChannelType, ReactionType},
@@ -20,6 +21,8 @@ use serenity::{
         Permissions,
     },
 };
+use serenity::futures::StreamExt;
+use sqlx::{query, query_scalar};
 
 use crate::{
     config::{Command, Config},
@@ -106,11 +109,10 @@ pub async fn execute(
     match action {
         Action::Create => {
             // Get count of owned guilds
-            let count: i64 = database
-                .client
-                .query_one("SELECT COUNT(*) FROM owned_guilds", &[])
+            let count: i64 = query_scalar!("SELECT COUNT(*) FROM owned_guilds")
+                .fetch_one(database.db())
                 .await?
-                .get(0);
+                .unwrap_or_default();
 
             // Create guild
             let partial_guild =
@@ -120,14 +122,13 @@ pub async fn execute(
             let guild_db_id = database.get_guild(partial_guild.id).await?;
 
             // Add guild to database
-            database
-                .client
-                .execute(
-                    "
-                    INSERT INTO owned_guilds VALUES ($1::BIGINT)",
-                    &[&guild_db_id],
-                )
-                .await?;
+            query!(
+                "
+                    INSERT INTO owned_guilds VALUES ($1)",
+                guild_db_id,
+            )
+            .execute(database.db())
+            .await?;
 
             // Get invite
             let invite = get_invite(ctx, &partial_guild).await?;
@@ -146,13 +147,11 @@ pub async fn execute(
         }
         Action::Edit => {
             // Get list of owned guilds
-            let owned: Vec<GuildId> = database
-                .client
-                .query("SELECT guild FROM owned_guilds", &[])
-                .await?
-                .iter()
-                .map(|row| GuildId(row.get::<_, i64>(0) as u64))
-                .collect();
+            let owned: Vec<GuildId> = query_scalar!("SELECT guild FROM owned_guilds")
+                .fetch(database.db())
+                .map_ok(|guild| GuildId::from(guild as u64))
+                .try_collect()
+                .await?;
 
             if owned.is_empty() {
                 send_response(
@@ -485,16 +484,15 @@ async fn guild_action(
 
                     if partial_guild.owner_id == command.user.id {
                         // Get guild id
-                        let guild_db_id = database.get_guild(current_guild_id.clone()).await?;
+                        let guild_db_id = current_guild_id.0 as i64;
 
                         // Remove guild from database
-                        database
-                            .client
-                            .execute(
-                                "DELETE FROM owned_guilds WHERE guild = $1::BIGINT",
-                                &[&guild_db_id],
-                            )
-                            .await?;
+                        query!(
+                            "DELETE FROM owned_guilds WHERE guild = $1",
+                            guild_db_id,
+                        )
+                        .execute(database.db())
+                        .await?;
 
                         send_response(
                             ctx,
@@ -519,18 +517,16 @@ async fn guild_action(
                 }
                 ComponentInteractionResponse::Delete => {
                     // Get guild id
-                    let guild_db_id = database.get_guild(current_guild_id.clone()).await?;
+                    let guild_db_id = current_guild_id.0 as i64;
 
                     // Delete guild (ignore result because of a library bug)
                     let _ = current_guild_id.delete(&ctx.http).await;
 
                     // Remove guild from database
-                    database
-                        .client
-                        .execute(
-                            "DELETE FROM owned_guilds WHERE guild = $1::BIGINT",
-                            &[&guild_db_id],
-                        )
+                    query!(
+                            "DELETE FROM owned_guilds WHERE guild = $1",
+                            guild_db_id,
+                        ).execute(database.db())
                         .await?;
 
                     send_response(

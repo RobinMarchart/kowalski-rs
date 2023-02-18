@@ -30,7 +30,7 @@ use tracing::error;
 
 use crate::{
     config::{Command, CommandOption, Config, Module, Value},
-    database::types::ModuleStatus,
+    database::types::{ModuleStatus, Modules},
     error::KowalskiError,
     error::KowalskiError::DiscordApiError,
     strings::{ERR_CMD_ARGS_INVALID, ERR_CMD_CREATION, ERR_CMD_SEND_FAILURE},
@@ -312,7 +312,7 @@ pub async fn create_module_command(
     ctx: &Context,
     config: &Config,
     guild: GuildId,
-    status: &ModuleStatus,
+    status: &Modules,
 ) {
     // Filter commands for the configuration of the current guild
     let filtered = config
