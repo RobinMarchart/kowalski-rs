@@ -4,6 +4,7 @@ pub const INFO_CMD_MODULE: &str = "Module commands registered.";
 pub const INFO_CONNECTED: &str = "Connection to Discord API established!";
 pub const INFO_DB_CONNECTED: &str = "Database connection established.";
 pub const INFO_DB_SETUP: &str = "Database setup complete.";
+pub const INFO_DB_MIGRATION: &str = "Migration complete.";
 // Error messages
 pub const ERR_API_LOAD: &str = "Failed to request information from the REST API";
 pub const ERR_AUTOCOMPLETE: &str = "Failed to answer the autocomplete request";

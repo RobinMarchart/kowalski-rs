@@ -1,15 +1,23 @@
 use std::{env, error::Error, sync::Arc};
 
+use crate::data;
 use serenity::prelude::GatewayIntents;
+use sqlx::{migrate, query};
 use tokio::sync::RwLock;
+use tracing::info;
 
 #[cfg(feature = "nlp-model")]
 use crate::model::Model;
 use crate::{
-    config::Config, cooldowns::Cooldowns, credits::Credits, database::client::Database,
-    events::handler::Handler, history::History, strings::ERR_ENV_NOT_SET, error::KowalskiError,
+    config::Config,
+    cooldowns::Cooldowns,
+    credits::Credits,
+    database::client::Database,
+    error::KowalskiError,
+    events::handler::Handler,
+    history::History,
+    strings::{ERR_ENV_NOT_SET, INFO_DB_MIGRATION},
 };
-
 
 /// The bot client.
 pub struct Client {
@@ -17,7 +25,7 @@ pub struct Client {
 }
 
 impl Client {
-    pub async fn default() -> Result<Self,KowalskiError> {
+    pub async fn default() -> Result<Self, KowalskiError> {
         // Get bot token
         let token = env::var("BOT_TOKEN").expect(&format!("{}: {}", ERR_ENV_NOT_SET, "BOT_TOKEN"));
 
@@ -25,7 +33,7 @@ impl Client {
         Client::new(token).await
     }
 
-    pub async fn new(token: String) -> Result<Self,KowalskiError> {
+    pub async fn new(token: String) -> Result<Self, KowalskiError> {
         // Get bot application id
         let id = env::var("BOT_ID")
             .expect(&format!("{}: {}", ERR_ENV_NOT_SET, "BOT_ID"))
@@ -71,6 +79,28 @@ impl Client {
         }
 
         Ok(Client { client })
+    }
+
+    pub async fn migrate(&mut self) -> Result<(), KowalskiError> {
+        let database = data!(self.client, Database);
+        //apply migrations
+        migrate!().run(database.db()).await?;
+
+        let migrations=crate::migration::migrations();
+
+        for migration in query!("SELECT identifier,id FROM fixup_tracking WHERE NOT fixed ORDER BY id")
+            .fetch_all(database.db())
+            .await?
+        {
+            if let Some(fixup)=migrations.get(migration.identifier.as_str()){
+                info!("Running fixup {}",&migration.identifier);
+                fixup.migrate(&database, &self.client).await?;
+                query!("UPDATE fixup_tracking SET fixed=TRUE WHERE id=$1",migration.id).execute(database.db());
+            }
+        }
+
+        info!("{}", INFO_DB_MIGRATION);
+        Ok(())
     }
 
     pub async fn start(&mut self) -> Result<(), serenity::Error> {

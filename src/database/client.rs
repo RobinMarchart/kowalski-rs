@@ -39,8 +39,6 @@ impl Database {
         .await?;
         info!("{}", INFO_DB_CONNECTED);
 
-        //apply migrations
-        migrate!().run(&db).await?;
         info!("{}", INFO_DB_SETUP);
 
         Ok(Database { db })

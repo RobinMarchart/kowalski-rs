@@ -6,15 +6,56 @@ use serenity::{
         id::{ChannelId, GuildId, MessageId, RoleId, UserId},
     },
 };
-use sqlx::{query, query_as, query_scalar};
+use sqlx::{query, query_as, query_scalar, Transaction, Postgres, pool::PoolConnection};
 
 use crate::{
+    commands::score,
     config::Config,
     cooldowns::Cooldowns,
     data,
     database::{client::Database, types::Modules},
     error::KowalskiError,
 };
+
+pub struct ReactionRoleLock{
+    db:Option<PoolConnection<Postgres>>
+}
+
+impl ReactionRoleLock {
+    async fn new(db:&Database)->Result<ReactionRoleLock,KowalskiError>{
+        let mut db=db.acquire().await?;
+        query!(
+                "SELECT  pg_advisory_lock(oid::BIGINT)
+                    FROM pg_class WHERE relname = 'reaction_roles'"
+            ).execute(&mut db).await?;
+        Ok(ReactionRoleLock { db:Some(db) })
+    }
+    async fn drop(mut self)->Result<(),KowalskiError>{
+            let mut db=self.db.take().unwrap();
+            std::mem::forget(self);
+            query!(
+                "SELECT  pg_advisory_unlock(oid::BIGINT)
+                    FROM pg_class WHERE relname = 'reaction_roles'"
+            ).fetch_one(&mut db).await;
+        Ok(())
+    }
+    fn db(&mut self)->&mut PoolConnection<Postgres>{
+        &mut self.db.unwrap()
+    }
+}
+
+impl Drop for ReactionRoleLock{
+    fn drop(&mut self) {
+        let db=self.db.take().unwrap();
+        tokio::spawn(async move{
+            query!(
+                "SELECT  pg_advisory_unlock(oid::BIGINT)
+                    FROM pg_class WHERE relname = 'reaction_roles'"
+            ).fetch_one(&mut db).await;
+        });
+    }
+}
+
 
 pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), KowalskiError> {
     // Get database
@@ -39,19 +80,63 @@ pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), K
         .fetch_optional(database.db())
         .await?
         .unwrap_or_default();
-
+        if status.reaction_roles{
+            //locking for reaction roles. This ensures that reaction roles are always followed;
+            let mut database= ReactionRoleLock::new(&database).await?;
         // Get the reaction-roles to assign
-        let reaction_roles: Vec<_> = if status.reaction_roles {
-            query!(
-                "
-                    SELECT role, slots, _reaction_roles_id FROM reaction_roles_v
-                    WHERE guild = $1 AND channel = $2 AND message = $3
-                    AND _emoji_id = $4
-                    ",
+            let reaction_roles=query!(
+                r#"
+                    WITH existing AS (
+                            --all roles that may be removed from the user
+                            SELECT _role_id as id
+                            FROM given_roles_v
+                            WHERE "user" = $5 AND guild = $1),
+                         space AS (
+                            --all reaction roles that have space for another member
+                            WITH members AS (
+                                SELECT _role_id, COUNT(_user_id) as users
+                                FROM given_roles_v
+                                WHERE guild=$1
+                                GROUP BY _role_id
+                            )
+                            SELECT r._role_id AS id
+                            FROM reaction_roles_v AS r
+                            LEFT OUTER JOIN members AS m ON r._role_id = m._role_id
+                            WHERE (r.slots > coalesce(m.users,0)) IS NOT FALSE AND r.guild = $1
+                    )
+                    SELECT role, slots, _reaction_roles_id AS reaction_role_id
+                        , _role_id NOT IN (SELECT id FROM existing) AS give
+                    FROM reaction_roles_v
+                    WHERE guild = $1 AND channel = $2 AND message = $3 AND _emoji_id = $4
+                    -- check that there is space for the user if they don't already have the role
+                    AND (_role_id IN (SELECT id FROM existing) OR _role_id IN (SELECT id FROM space))
+                    "#,
                 guild_id,
                 channel_id,
                 message_id,
-                emoji_id
+                emoji_id,
+                user_from_id
+            )
+            .fetch_all(database.db())
+            .await?;
+            database.drop().await?
+        }
+        let reaction_roles: Vec<_> = if status.reaction_roles {
+            query!(
+                r#"
+                    SELECT role, slots, _reaction_roles_id AS reaction_role_id, _role_id NOT IN
+                        (SELECT _role_id
+                            FROM given_roles_v
+                            WHERE "user"=$5 AND guild = $1) AS give
+                    FROM reaction_roles_v
+                    WHERE guild = $1 AND channel = $2 AND message = $3
+                    AND _emoji_id = $4
+                    "#,
+                guild_id,
+                channel_id,
+                message_id,
+                emoji_id,
+                user_from_id
             )
             .fetch_all(database.db())
             .await?
@@ -98,11 +183,13 @@ pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), K
             add_reaction.delete(&ctx.http).await?;
 
             for row in reaction_roles {
-                let (role, slots, id) = (
+                let (role, slots, id, give) = (
                     row.role.unwrap(),
                     row.slots,
-                    row._reaction_roles_id.unwrap(),
+                    row.reaction_role_id.unwrap(),
+                    row.give.unwrap()
                 );
+
                 if member
                     .roles
                     .contains(&RoleId::from(row.role.unwrap() as u64))
@@ -196,8 +283,14 @@ pub async fn reaction_add(ctx: &Context, add_reaction: Reaction) -> Result<(), K
                 update_roles(&ctx, &database, &mut member).await?;
 
                 // Auto moderate the message if necessary
-                let message = add_reaction.message(&ctx.http).await?;
-                auto_moderate(&ctx, &database, guild_id, message).await?;
+                auto_moderate(
+                    &ctx,
+                    &database,
+                    guild_id,
+                    ChannelId(channel_id as u64),
+                    MessageId(message_id as u64),
+                )
+                .await?;
             }
         }
     }
@@ -277,8 +370,7 @@ pub async fn reaction_remove(
             update_roles(&ctx, &database, &mut member).await?;
 
             // Auto moderate the message if necessary
-            let message = removed_reaction.message(&ctx.http).await?;
-            auto_moderate(&ctx, &database, guild_id, message).await?;}
+            auto_moderate(&ctx, &database, guild_id, ChannelId(channel_id as u64),MessageId( message_id as u64)).await?;}
         }
     }
 
@@ -305,17 +397,29 @@ pub async fn reaction_remove_all(
                 USING users AS u
                 WHERE u.guild=$1 and channel=$2 and message=$3 and user_to=u.id
                 RETURNING u.user)
-            SELECT DISTINCT user FROM r",
-            guild_id,channel_id,message_id
-        ).fetch_all(database.db()).await?;
-        for user in affected_users{
-             let guild_id = GuildId::from(guild_id as u64);
-                // Get the member
-                let mut member = guild_id.member(&ctx, user as u64).await?;
+            SELECT DISTINCT * FROM r",
+            guild_id,
+            channel_id,
+            message_id
+        )
+        .fetch_all(database.db())
+        .await?;
+        for user in affected_users {
+            let guild_id = GuildId::from(guild_id as u64);
+            // Get the member
+            let mut member = guild_id.member(&ctx, user as u64).await?;
 
             // Update the roles of the user
             update_roles(&ctx, &database, &mut member).await?
         }
+        auto_moderate(
+            &ctx,
+            &database,
+            GuildId(guild_id as u64),
+            ChannelId(channel_id as u64),
+            MessageId(message_id as u64),
+        )
+        .await?;
     }
 
     Ok(())
@@ -378,6 +482,8 @@ async fn update_roles(
     if member.user.bot {
         return Ok(());
     }
+
+    let roles=member
 
     // Get guild and user ids
     let guild_db_id = database.get_guild(member.guild_id).await?;
@@ -477,85 +583,34 @@ async fn auto_moderate(
     ctx: &Context,
     database: &Database,
     guild_id: GuildId,
-    message: Message,
+    channel_id: ChannelId,
+    message_id: MessageId,
 ) -> Result<(), KowalskiError> {
-    // Get guild and message ids
-    let guild_db_id = database.get_guild(guild_id).await?;
-    let message_db_id = database
-        .get_message(guild_id, message.channel_id, message.id)
-        .await?;
-
-    // Get scores of auto-pin and auto-delete
-    let pin_score = {
-        let row = database
-            .client
-            .query_opt(
-                "
-        SELECT score FROM score_auto_pin
-        WHERE guild = $1::BIGINT
+    if let Some(state) = query!(
+        "WITH score AS (
+            SELECT SUM(CASE WHEN upvote THEN 1 ELSE -1 END) AS score FROM score_reactions_v
+            WHERE guild=$1 AND channel=$2 AND message=$3
+        )
+        SELECT s.score, pin.score AS pin, delete.score AS delete
+        FROM score as s
+        LEFT OUTER JOIN score_auto_pin AS pin ON pin.guild = $1
+        LEFT OUTER JOIN score_auto_delete AS delete ON delete.guild = $1
         ",
-                &[&guild_db_id],
-            )
-            .await?;
-
-        row.map(|row| row.get::<_, i64>(0))
-    };
-
-    let delete_score = {
-        let row = database
-            .client
-            .query_opt(
-                "
-        SELECT score FROM score_auto_delete
-        WHERE guild = $1::BIGINT
-        ",
-                &[&guild_db_id],
-            )
-            .await?;
-
-        row.map(|row| row.get::<_, i64>(0))
-    };
-
-    // Check whether auto moderation is enabled
-    if pin_score.is_some() || delete_score.is_some() {
-        // Get score of the message
-        let score = {
-            let row = database
-                .client
-                .query_one(
-                    "
-                SELECT SUM(CASE WHEN upvote THEN 1 ELSE -1 END) FROM score_reactions r
-                INNER JOIN score_emojis se ON r.guild = se.guild AND r.emoji = se.emoji
-                WHERE r.guild = $1::BIGINT AND message = $2::BIGINT
-                ",
-                    &[&guild_db_id, &message_db_id],
-                )
-                .await?;
-
-            row.get::<_, Option<i64>>(0).unwrap_or_default()
-        };
-
-        // Check whether message should get pinned
-        if !message.pinned {
-            if let Some(pin_score) = pin_score {
-                // Check whether scores share the same sign
-                if (score >= 0) == (pin_score >= 0) {
-                    if score.abs() >= pin_score.abs() {
-                        // Pin the message
-                        message.pin(&ctx.http).await?;
-                    }
-                }
+        guild_id.0 as i64,
+        channel_id.0 as i64,
+        message_id.0 as i64
+    )
+    .fetch_optional(database.db())
+    .await?
+    {
+        if let (Some(score), Some(pin)) = (state.score, state.pin) {
+            if score >= pin {
+                channel_id.pin(ctx, message_id);
+                return Ok(());
             }
-        }
-
-        // Check whether message should get deleted
-        if let Some(delete_score) = delete_score {
-            // Check whether scores share the same sign
-            if (score >= 0) == (delete_score >= 0) {
-                if score.abs() >= delete_score.abs() {
-                    // Delete the message
-                    message.delete(&ctx.http).await?;
-                }
+        } else if let (Some(score), Some(delete)) = (state.score, state.delete) {
+            if score <= delete {
+                channel_id.delete_message(ctx, message_id).await?;
             }
         }
     }

@@ -76,6 +76,17 @@ macro_rules! row_id {
     };
 }
 
+#[macro_export]
+macro_rules! migrations {
+    ($( ($migration:ty,$name:literal) ),*) => {
+        {
+            let map=::std::collections::HashMap::<&'static str,::std::boxed::Box<dyn $crate::migration::Migration>>::new();
+            $(map.insert($name,Box::new(<$migration as ::std::default::Default>::default()));)*
+            map
+        }
+    };
+}
+
 pub enum InteractionResponse {
     Continue,
     Abort,

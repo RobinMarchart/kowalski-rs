@@ -1,3 +1,5 @@
+
+pub mod utils;
 #[cfg(feature = "event-calendar")]
 pub mod calendar;
 pub mod client;
@@ -13,7 +15,7 @@ pub mod history;
 pub mod model;
 pub mod reminders;
 pub mod strings;
-pub mod utils;
+pub mod migration;
 
 
 use std::error::Error;
